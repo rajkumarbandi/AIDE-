@@ -14,6 +14,11 @@
 # MAGIC still ingested, via a generic tab-delimited + automatic-schema-inference fallback.
 # MAGIC
 # MAGIC **Validated for:** Customer, Person, Address, Product, SalesOrderHeader, SalesOrderDetail.
+# MAGIC
+# MAGIC **Execution modes:** set the `File Name` widget to a specific file (e.g. `Product.csv`)
+# MAGIC to ingest just that table, or to `ALL` (case-insensitive) to discover and ingest every
+# MAGIC CSV file in `Dataset Folder`. Both modes call the same `ingest_one_file` pipeline; ALL
+# MAGIC mode isolates failures per file so one bad table doesn't stop the rest.
 
 # COMMAND ----------
 
@@ -24,7 +29,7 @@
 dbutils.widgets.text("catalog", "aide_dev", "Catalog")
 dbutils.widgets.text("schema", "bronze", "Schema")
 dbutils.widgets.text("dataset_folder", "/Volumes/aide_dev/raw/adventureworks", "Dataset Folder")
-dbutils.widgets.text("file_name", "Customer.csv", "File Name")
+dbutils.widgets.text("file_name", "Customer.csv", "File Name (or ALL)")
 
 # COMMAND ----------
 
@@ -378,19 +383,23 @@ def write_bronze_table(df: DataFrame, catalog: str, schema: str, table_name: str
     return full_table_name
 
 
-def validate_ingestion(spark: SparkSession, full_table_name: str) -> dict:
+def validate_ingestion(spark: SparkSession, full_table_name: str, verbose: bool = True) -> dict:
     """Re-read the table from Unity Catalog (not the in-memory DataFrame) to confirm
     it was actually written and is queryable, then print the required validation facts.
+
+    `verbose=False` skips the printing (used by ALL mode, which reports its own
+    per-file summary table instead) but still computes and returns the same stats.
     """
     table_df = spark.table(full_table_name)
     row_count = table_df.count()
     column_count = len(table_df.columns)
 
-    print(f"Table Name    : {full_table_name}")
-    print(f"Row Count     : {row_count:,}")
-    print(f"Column Count  : {column_count}")
-    print("Schema        :")
-    table_df.printSchema()
+    if verbose:
+        print(f"Table Name    : {full_table_name}")
+        print(f"Row Count     : {row_count:,}")
+        print(f"Column Count  : {column_count}")
+        print("Schema        :")
+        table_df.printSchema()
 
     return {"row_count": row_count, "column_count": column_count}
 
@@ -409,6 +418,132 @@ def print_execution_summary(
     print(f"Elapsed Time (sec)   : {elapsed_seconds:.2f}")
     print("Status               : SUCCESS")
     print("=" * 80)
+
+
+# COMMAND ----------
+
+# MAGIC %md ## Single-file pipeline (shared by both execution modes)
+
+# COMMAND ----------
+
+
+def ingest_one_file(
+    spark: SparkSession,
+    registry: dict,
+    dataset_folder: str,
+    catalog: str,
+    schema_name: str,
+    file_name: str,
+    verbose: bool = True,
+) -> dict:
+    """Run the full Bronze ingestion pipeline for exactly one source file.
+
+    This is the single ingestion pipeline used by both execution modes: single-file
+    mode calls it once, ALL mode calls it once per discovered file. It raises on
+    failure rather than swallowing errors — callers decide whether that should stop
+    the run (single-file mode) or be recorded and skipped (ALL mode). `verbose`
+    controls only presentation (validation prints / preview display), never the
+    ingestion logic itself.
+    """
+    table_config = resolve_table_config(registry, file_name)
+
+    source_path = f"{dataset_folder.rstrip('/')}/{file_name}"
+    if not _path_exists(source_path):
+        raise SourceFileNotFoundError(f"Source file not found: '{source_path}'.")
+
+    raw_df = read_source_file(spark, source_path, table_config)
+    typed_df = apply_schema(raw_df, table_config)
+    bronze_df = add_audit_columns(typed_df, source_path)
+
+    full_table_name = write_bronze_table(
+        bronze_df, catalog, schema_name, table_config.target_table
+    )
+
+    stats = validate_ingestion(spark, full_table_name, verbose=verbose)
+    if verbose:
+        display(spark.table(full_table_name).limit(10))
+
+    return {"full_table_name": full_table_name, **stats}
+
+
+# COMMAND ----------
+
+# MAGIC %md ## ALL mode — file discovery & bulk orchestration
+
+# COMMAND ----------
+
+SUPPORTED_SOURCE_EXTENSION = ".csv"
+
+
+def discover_source_files(dataset_folder: str) -> list:
+    """List every supported CSV file directly under dataset_folder, sorted
+    alphabetically (case-insensitive) so ALL-mode runs are deterministic and easy to
+    read in the summary. Sub-directories are skipped, not descended into.
+    """
+    entries = dbutils.fs.ls(dataset_folder)
+    csv_files = [
+        entry.name
+        for entry in entries
+        if not entry.name.endswith("/") and entry.name.lower().endswith(SUPPORTED_SOURCE_EXTENSION)
+    ]
+    return sorted(csv_files, key=str.lower)
+
+
+def run_bulk_ingestion(
+    spark: SparkSession, registry: dict, dataset_folder: str, catalog: str, schema_name: str
+) -> list:
+    """Ingest every discovered CSV file, one at a time, via ingest_one_file.
+
+    Each file's failure is caught and recorded here rather than propagating — the
+    purpose of ALL mode is a best-effort sweep across every AdventureWorks table, so
+    one bad file must never abort the rest of the run.
+    """
+    source_files = discover_source_files(dataset_folder)
+    if not source_files:
+        logger.warning("No CSV files found under '%s'.", dataset_folder)
+
+    results = []
+    for source_file in source_files:
+        try:
+            ingest_one_file(
+                spark, registry, dataset_folder, catalog, schema_name, source_file, verbose=False
+            )
+            results.append({"file_name": source_file, "status": "SUCCESS", "error": None})
+            logger.info("Ingested '%s' successfully.", source_file)
+        except Exception as exc:
+            results.append({"file_name": source_file, "status": "FAILED", "error": str(exc)})
+            logger.error("Ingestion failed for '%s': %s", source_file, exc)
+
+    return results
+
+
+def print_bulk_summary(results: list, elapsed_seconds: float) -> None:
+    """Print the ALL-mode execution summary: a per-file status table, aggregate
+    counts, and full exception messages for any failures.
+    """
+    succeeded = sum(1 for r in results if r["status"] == "SUCCESS")
+    failed = len(results) - succeeded
+
+    print("-" * 60)
+    print("AdventureWorks Bronze Ingestion Summary")
+    print("-" * 60)
+    for result in results:
+        print(f"{result['file_name']:<28}{result['status']}")
+    print("-" * 60)
+    print(f"Total Files        : {len(results)}")
+    print(f"Succeeded          : {succeeded}")
+    print(f"Failed             : {failed}")
+    print(f"Execution Time     : {elapsed_seconds:.2f} sec")
+    print("-" * 60)
+
+    failures = [r for r in results if r["status"] == "FAILED"]
+    if failures:
+        print("Failure Details")
+        print("-" * 60)
+        for result in failures:
+            print(f"File Name          : {result['file_name']}")
+            print(f"Exception Message : {result['error']}")
+            print("-" * 60)
 
 
 # COMMAND ----------
@@ -438,25 +573,17 @@ def main() -> None:
         repo_root = get_repo_root()
         registry_path = os.path.join(repo_root, "config", "adventureworks_tables.yaml")
         registry = load_table_registry(registry_path)
-        table_config = resolve_table_config(registry, file_name)
 
-        source_path = f"{dataset_folder.rstrip('/')}/{file_name}"
-        if not _path_exists(source_path):
-            raise SourceFileNotFoundError(f"Source file not found: '{source_path}'.")
-
-        raw_df = read_source_file(spark, source_path, table_config)
-        typed_df = apply_schema(raw_df, table_config)
-        bronze_df = add_audit_columns(typed_df, source_path)
-
-        full_table_name = write_bronze_table(
-            bronze_df, catalog, schema_name, table_config.target_table
-        )
-
-        stats = validate_ingestion(spark, full_table_name)
-        display(spark.table(full_table_name).limit(10))
-
-        elapsed_seconds = time.perf_counter() - start_time
-        print_execution_summary(file_name, full_table_name, stats, elapsed_seconds)
+        if file_name.strip().upper() == "ALL":
+            results = run_bulk_ingestion(spark, registry, dataset_folder, catalog, schema_name)
+            elapsed_seconds = time.perf_counter() - start_time
+            print_bulk_summary(results, elapsed_seconds)
+        else:
+            result = ingest_one_file(
+                spark, registry, dataset_folder, catalog, schema_name, file_name, verbose=True
+            )
+            elapsed_seconds = time.perf_counter() - start_time
+            print_execution_summary(file_name, result["full_table_name"], result, elapsed_seconds)
 
     except BronzeIngestionError:
         logger.exception("Bronze ingestion failed for '%s'.", file_name)
