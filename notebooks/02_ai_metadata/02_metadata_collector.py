@@ -100,7 +100,10 @@ TABLE_METADATA_SCHEMA = StructType(
         StructField("created_at", TimestampType(), nullable=True),
         StructField("last_modified_at", TimestampType(), nullable=True),
         StructField("columns", ArrayType(COLUMN_METADATA_SCHEMA), nullable=False),
-        StructField("metadata_collected_at", TimestampType(), nullable=False),
+        # Seeded as None in collect_table_metadata and overwritten via current_timestamp()
+        # in write_metadata_table — must be nullable=True so createDataFrame's schema
+        # validation accepts that placeholder before the overwrite happens.
+        StructField("metadata_collected_at", TimestampType(), nullable=True),
     ]
 )
 
