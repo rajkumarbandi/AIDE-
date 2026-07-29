@@ -216,3 +216,14 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# AIDE — Databricks / generated artifacts
+.databricks/
+*.dbc
+
+# AIDE — runtime-generated AI output and reports (keep committed samples + folder READMEs)
+outputs/*
+!outputs/README.md
+!outputs/samples/
+reports/*
+!reports/README.md

@@ -1,0 +1,160 @@
+# AdventureWorks Table Registry
+#
+# Metadata-driven schema definitions for the Bronze ingestion framework
+# (notebooks/01_development/01_bronze_ingestion.py).
+#
+# Onboarding a new AdventureWorks table = adding an entry here, not writing code.
+# The notebook falls back to generic tab-delimited parsing + automatic type
+# inference for any source file that has no entry below (see the notebook's
+# `resolve_table_config` for the fallback behavior).
+#
+# Column names/types and delimiters below were verified directly against
+# data/adventureworks/instawdb.sql (BULK INSERT FIELDTERMINATOR/ROWTERMINATOR
+# clauses and CREATE TABLE column order) and against the actual bytes of each
+# CSV — not assumed. Two verified deviations from a naive header-less read:
+#
+#   1. Person.csv is NOT comma/tab-delimited. Its BULK INSERT uses
+#      FIELDTERMINATOR = '+|' and ROWTERMINATOR = '&|\n' (Microsoft's own
+#      workaround for delimiter collisions with the free-text/XML columns in
+#      that table). Spark's CSV reader only supports single-character
+#      delimiters, so this table is parsed via a dedicated text-split path.
+#   2. Several tables include computed columns (e.g. Customer.AccountNumber,
+#      SalesOrderHeader.SalesOrderNumber/TotalDue) as literal data in the CSV,
+#      even though those columns are SQL Server computed columns excluded
+#      from a strict BULK INSERT. Column lists below reflect the columns as
+#      they actually appear in the CSV (verified by field-count + value-shape
+#      inspection), not a literal copy of the BULK INSERT's target column list.
+
+tables:
+  customer:
+    source_file: Customer.csv
+    target_table: customer
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: customer_id, type: int }
+      - { name: person_id, type: int }
+      - { name: store_id, type: int }
+      - { name: territory_id, type: int }
+      - { name: account_number, type: string }
+      - { name: rowguid, type: string }
+      - { name: modified_date, type: timestamp }
+
+  person:
+    source_file: Person.csv
+    target_table: person
+    delimiter: "+|"
+    row_terminator_marker: "&|"
+    columns:
+      - { name: business_entity_id, type: int }
+      - { name: person_type, type: string }
+      - { name: name_style, type: int }
+      - { name: title, type: string }
+      - { name: first_name, type: string }
+      - { name: middle_name, type: string }
+      - { name: last_name, type: string }
+      - { name: suffix, type: string }
+      - { name: email_promotion, type: int }
+      - { name: additional_contact_info, type: string }
+      - { name: demographics, type: string }
+      - { name: rowguid, type: string }
+      - { name: modified_date, type: timestamp }
+
+  address:
+    source_file: Address.csv
+    target_table: address
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: address_id, type: int }
+      - { name: address_line1, type: string }
+      - { name: address_line2, type: string }
+      - { name: city, type: string }
+      - { name: state_province_id, type: int }
+      - { name: postal_code, type: string }
+      - { name: spatial_location, type: string }
+      - { name: rowguid, type: string }
+      - { name: modified_date, type: timestamp }
+
+  product:
+    source_file: Product.csv
+    target_table: product
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: product_id, type: int }
+      - { name: name, type: string }
+      - { name: product_number, type: string }
+      - { name: make_flag, type: int }
+      - { name: finished_goods_flag, type: int }
+      - { name: color, type: string }
+      - { name: safety_stock_level, type: int }
+      - { name: reorder_point, type: int }
+      - { name: standard_cost, type: "decimal(19,4)" }
+      - { name: list_price, type: "decimal(19,4)" }
+      - { name: size, type: string }
+      - { name: size_unit_measure_code, type: string }
+      - { name: weight_unit_measure_code, type: string }
+      - { name: weight, type: "decimal(8,2)" }
+      - { name: days_to_manufacture, type: int }
+      - { name: product_line, type: string }
+      - { name: class, type: string }
+      - { name: style, type: string }
+      - { name: product_subcategory_id, type: int }
+      - { name: product_model_id, type: int }
+      - { name: sell_start_date, type: timestamp }
+      - { name: sell_end_date, type: timestamp }
+      - { name: discontinued_date, type: timestamp }
+      - { name: rowguid, type: string }
+      - { name: modified_date, type: timestamp }
+
+  salesorderheader:
+    source_file: SalesOrderHeader.csv
+    target_table: sales_order_header
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: sales_order_id, type: int }
+      - { name: revision_number, type: int }
+      - { name: order_date, type: timestamp }
+      - { name: due_date, type: timestamp }
+      - { name: ship_date, type: timestamp }
+      - { name: status, type: int }
+      - { name: online_order_flag, type: int }
+      - { name: sales_order_number, type: string }
+      - { name: purchase_order_number, type: string }
+      - { name: account_number, type: string }
+      - { name: customer_id, type: int }
+      - { name: sales_person_id, type: int }
+      - { name: territory_id, type: int }
+      - { name: bill_to_address_id, type: int }
+      - { name: ship_to_address_id, type: int }
+      - { name: ship_method_id, type: int }
+      - { name: credit_card_id, type: int }
+      - { name: credit_card_approval_code, type: string }
+      - { name: currency_rate_id, type: int }
+      - { name: sub_total, type: "decimal(19,4)" }
+      - { name: tax_amt, type: "decimal(19,4)" }
+      - { name: freight, type: "decimal(19,4)" }
+      - { name: total_due, type: "decimal(19,4)" }
+      - { name: comment, type: string }
+      - { name: rowguid, type: string }
+      - { name: modified_date, type: timestamp }
+
+  salesorderdetail:
+    source_file: SalesOrderDetail.csv
+    target_table: sales_order_detail
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: sales_order_id, type: int }
+      - { name: sales_order_detail_id, type: int }
+      - { name: carrier_tracking_number, type: string }
+      - { name: order_qty, type: int }
+      - { name: product_id, type: int }
+      - { name: special_offer_id, type: int }
+      - { name: unit_price, type: "decimal(19,4)" }
+      - { name: unit_price_discount, type: "decimal(19,4)" }
+      - { name: line_total, type: "decimal(19,4)" }
+      - { name: rowguid, type: string }
+      - { name: modified_date, type: timestamp }
