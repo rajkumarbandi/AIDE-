@@ -23,6 +23,20 @@
 
 # COMMAND ----------
 
+# MAGIC %pip install -U google-genai
+
+# COMMAND ----------
+
+# MAGIC %restart_python
+
+# COMMAND ----------
+
+from google import genai
+
+print("Gemini SDK Loaded Successfully")
+
+# COMMAND ----------
+
 # MAGIC %md ## Imports & logging
 
 # COMMAND ----------
