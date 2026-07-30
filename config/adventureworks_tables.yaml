@@ -24,6 +24,31 @@
 #      from a strict BULK INSERT. Column lists below reflect the columns as
 #      they actually appear in the CSV (verified by field-count + value-shape
 #      inspection), not a literal copy of the BULK INSERT's target column list.
+#
+# The remaining tables below (all except the original 6) were added by an automated
+# pass that parses every CREATE TABLE + BULK INSERT clause in instawdb.sql and
+# cross-checks the resulting column count against each CSV's actual first data line
+# (same verification method as the two deviations above, applied at scale). A few
+# real issues that check caught and fixed:
+#   - "uniqueidentifier"-typed columns (e.g. rowguid) use an unbracketed SQL type in
+#     instawdb.sql and were silently dropped by an early version of the parser,
+#     undercounting every affected table by exactly one column.
+#   - `smallmoney` columns (CommissionPct, DiscountPct, TaxRate, CostRate) were not
+#     in the type map and fell back to "string"; added as decimal(10,4).
+#   - Computed columns default to "string" (safe for the common case: string
+#     concatenation, e.g. AccountNumber), but a few are actual arithmetic — see
+#     PurchaseOrderDetail.line_total/stocked_qty, PurchaseOrderHeader.total_due, and
+#     WorkOrder.stocked_qty below, verified individually against their SQL formulas.
+#
+# NOT included below: JobCandidate.csv and ProductReview.csv. Both have a free-text
+# column (Resume XML / review Comments) containing real, unescaped embedded newlines
+# with no quoting to mark field boundaries — true multi-line records. The current
+# Bronze readers (a plain per-physical-line text split for the "+|" delimiter style,
+# and Spark's CSV reader — whose multiLine mode only reassembles a field across lines
+# when it's quoted) cannot correctly reconstruct these records as-is; registering them
+# would silently produce corrupted rows rather than a load failure. Needs a targeted
+# reader fix (reassemble on the real row-terminator sequence, not on every newline)
+# before these two are safe to onboard.
 
 tables:
   customer:
@@ -157,4 +182,736 @@ tables:
       - { name: unit_price_discount, type: "decimal(19,4)" }
       - { name: line_total, type: "decimal(19,4)" }
       - { name: rowguid, type: string }
+      - { name: modified_date, type: timestamp }
+
+  awbuildversion:
+    source_file: AWBuildVersion.csv
+    target_table: awbuildversion
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: system_information_id, type: int }
+      - { name: version_date, type: timestamp }
+      - { name: modified_date, type: timestamp }
+  addresstype:
+    source_file: AddressType.csv
+    target_table: addresstype
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: address_type_id, type: int }
+      - { name: name, type: string }
+      - { name: rowguid, type: string }
+      - { name: modified_date, type: timestamp }
+  billofmaterials:
+    source_file: BillOfMaterials.csv
+    target_table: billofmaterials
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: bill_of_materials_id, type: int }
+      - { name: product_assembly_id, type: int }
+      - { name: component_id, type: int }
+      - { name: start_date, type: timestamp }
+      - { name: end_date, type: timestamp }
+      - { name: unit_measure_code, type: string }
+      - { name: bomlevel, type: int }
+      - { name: per_assembly_qty, type: "decimal(8,2)" }
+      - { name: modified_date, type: timestamp }
+  businessentity:
+    source_file: BusinessEntity.csv
+    target_table: businessentity
+    delimiter: "+|"
+    row_terminator_marker: "&|"
+    columns:
+      - { name: business_entity_id, type: int }
+      - { name: rowguid, type: string }
+      - { name: modified_date, type: timestamp }
+  businessentityaddress:
+    source_file: BusinessEntityAddress.csv
+    target_table: businessentityaddress
+    delimiter: "+|"
+    row_terminator_marker: "&|"
+    columns:
+      - { name: business_entity_id, type: int }
+      - { name: address_id, type: int }
+      - { name: address_type_id, type: int }
+      - { name: rowguid, type: string }
+      - { name: modified_date, type: timestamp }
+  businessentitycontact:
+    source_file: BusinessEntityContact.csv
+    target_table: businessentitycontact
+    delimiter: "+|"
+    row_terminator_marker: "&|"
+    columns:
+      - { name: business_entity_id, type: int }
+      - { name: person_id, type: int }
+      - { name: contact_type_id, type: int }
+      - { name: rowguid, type: string }
+      - { name: modified_date, type: timestamp }
+  contacttype:
+    source_file: ContactType.csv
+    target_table: contacttype
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: contact_type_id, type: int }
+      - { name: name, type: string }
+      - { name: modified_date, type: timestamp }
+  countryregion:
+    source_file: CountryRegion.csv
+    target_table: countryregion
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: country_region_code, type: string }
+      - { name: name, type: string }
+      - { name: modified_date, type: timestamp }
+  countryregioncurrency:
+    source_file: CountryRegionCurrency.csv
+    target_table: countryregioncurrency
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: country_region_code, type: string }
+      - { name: currency_code, type: string }
+      - { name: modified_date, type: timestamp }
+  creditcard:
+    source_file: CreditCard.csv
+    target_table: creditcard
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: credit_card_id, type: int }
+      - { name: card_type, type: string }
+      - { name: card_number, type: string }
+      - { name: exp_month, type: int }
+      - { name: exp_year, type: int }
+      - { name: modified_date, type: timestamp }
+  culture:
+    source_file: Culture.csv
+    target_table: culture
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: culture_id, type: string }
+      - { name: name, type: string }
+      - { name: modified_date, type: timestamp }
+  currency:
+    source_file: Currency.csv
+    target_table: currency
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: currency_code, type: string }
+      - { name: name, type: string }
+      - { name: modified_date, type: timestamp }
+  currencyrate:
+    source_file: CurrencyRate.csv
+    target_table: currencyrate
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: currency_rate_id, type: int }
+      - { name: currency_rate_date, type: timestamp }
+      - { name: from_currency_code, type: string }
+      - { name: to_currency_code, type: string }
+      - { name: average_rate, type: "decimal(19,4)" }
+      - { name: end_of_day_rate, type: "decimal(19,4)" }
+      - { name: modified_date, type: timestamp }
+  department:
+    source_file: Department.csv
+    target_table: department
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: department_id, type: int }
+      - { name: name, type: string }
+      - { name: group_name, type: string }
+      - { name: modified_date, type: timestamp }
+  document:
+    source_file: Document.csv
+    target_table: document
+    delimiter: "+|"
+    row_terminator_marker: "&|"
+    columns:
+      - { name: document_node, type: string }
+      - { name: document_level, type: string }
+      - { name: title, type: string }
+      - { name: owner, type: int }
+      - { name: folder_flag, type: int }
+      - { name: file_name, type: string }
+      - { name: file_extension, type: string }
+      - { name: revision, type: string }
+      - { name: change_number, type: int }
+      - { name: status, type: int }
+      - { name: document_summary, type: string }
+      - { name: document, type: string }
+      - { name: rowguid, type: string }
+      - { name: modified_date, type: timestamp }
+  emailaddress:
+    source_file: EmailAddress.csv
+    target_table: emailaddress
+    delimiter: "+|"
+    row_terminator_marker: "&|"
+    columns:
+      - { name: business_entity_id, type: int }
+      - { name: email_address_id, type: int }
+      - { name: email_address, type: string }
+      - { name: rowguid, type: string }
+      - { name: modified_date, type: timestamp }
+  employee:
+    source_file: Employee.csv
+    target_table: employee
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: business_entity_id, type: int }
+      - { name: national_idnumber, type: string }
+      - { name: login_id, type: string }
+      - { name: organization_node, type: string }
+      - { name: organization_level, type: string }
+      - { name: job_title, type: string }
+      - { name: birth_date, type: timestamp }
+      - { name: marital_status, type: string }
+      - { name: gender, type: string }
+      - { name: hire_date, type: timestamp }
+      - { name: salaried_flag, type: int }
+      - { name: vacation_hours, type: int }
+      - { name: sick_leave_hours, type: int }
+      - { name: current_flag, type: int }
+      - { name: rowguid, type: string }
+      - { name: modified_date, type: timestamp }
+  employeedepartmenthistory:
+    source_file: EmployeeDepartmentHistory.csv
+    target_table: employeedepartmenthistory
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: business_entity_id, type: int }
+      - { name: department_id, type: int }
+      - { name: shift_id, type: int }
+      - { name: start_date, type: timestamp }
+      - { name: end_date, type: timestamp }
+      - { name: modified_date, type: timestamp }
+  employeepayhistory:
+    source_file: EmployeePayHistory.csv
+    target_table: employeepayhistory
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: business_entity_id, type: int }
+      - { name: rate_change_date, type: timestamp }
+      - { name: rate, type: "decimal(19,4)" }
+      - { name: pay_frequency, type: int }
+      - { name: modified_date, type: timestamp }
+  illustration:
+    source_file: Illustration.csv
+    target_table: illustration
+    delimiter: "+|"
+    row_terminator_marker: "&|"
+    columns:
+      - { name: illustration_id, type: int }
+      - { name: diagram, type: string }
+      - { name: modified_date, type: timestamp }
+  location:
+    source_file: Location.csv
+    target_table: location
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: location_id, type: int }
+      - { name: name, type: string }
+      - { name: cost_rate, type: "decimal(10,4)" }
+      - { name: availability, type: "decimal(8,2)" }
+      - { name: modified_date, type: timestamp }
+  password:
+    source_file: Password.csv
+    target_table: password
+    delimiter: "+|"
+    row_terminator_marker: "&|"
+    columns:
+      - { name: business_entity_id, type: int }
+      - { name: password_hash, type: string }
+      - { name: password_salt, type: string }
+      - { name: rowguid, type: string }
+      - { name: modified_date, type: timestamp }
+  personcreditcard:
+    source_file: PersonCreditCard.csv
+    target_table: personcreditcard
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: business_entity_id, type: int }
+      - { name: credit_card_id, type: int }
+      - { name: modified_date, type: timestamp }
+  personphone:
+    source_file: PersonPhone.csv
+    target_table: personphone
+    delimiter: "+|"
+    row_terminator_marker: "&|"
+    columns:
+      - { name: business_entity_id, type: int }
+      - { name: phone_number, type: string }
+      - { name: phone_number_type_id, type: int }
+      - { name: modified_date, type: timestamp }
+  phonenumbertype:
+    source_file: PhoneNumberType.csv
+    target_table: phonenumbertype
+    delimiter: "+|"
+    row_terminator_marker: "&|"
+    columns:
+      - { name: phone_number_type_id, type: int }
+      - { name: name, type: string }
+      - { name: modified_date, type: timestamp }
+  productcategory:
+    source_file: ProductCategory.csv
+    target_table: productcategory
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: product_category_id, type: int }
+      - { name: name, type: string }
+      - { name: rowguid, type: string }
+      - { name: modified_date, type: timestamp }
+  productcosthistory:
+    source_file: ProductCostHistory.csv
+    target_table: productcosthistory
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: product_id, type: int }
+      - { name: start_date, type: timestamp }
+      - { name: end_date, type: timestamp }
+      - { name: standard_cost, type: "decimal(19,4)" }
+      - { name: modified_date, type: timestamp }
+  productdescription:
+    source_file: ProductDescription.csv
+    target_table: productdescription
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: product_description_id, type: int }
+      - { name: description, type: string }
+      - { name: rowguid, type: string }
+      - { name: modified_date, type: timestamp }
+  productdocument:
+    source_file: ProductDocument.csv
+    target_table: productdocument
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: product_id, type: int }
+      - { name: document_node, type: string }
+      - { name: modified_date, type: timestamp }
+  productinventory:
+    source_file: ProductInventory.csv
+    target_table: productinventory
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: product_id, type: int }
+      - { name: location_id, type: int }
+      - { name: shelf, type: string }
+      - { name: bin, type: int }
+      - { name: quantity, type: int }
+      - { name: rowguid, type: string }
+      - { name: modified_date, type: timestamp }
+  productlistpricehistory:
+    source_file: ProductListPriceHistory.csv
+    target_table: productlistpricehistory
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: product_id, type: int }
+      - { name: start_date, type: timestamp }
+      - { name: end_date, type: timestamp }
+      - { name: list_price, type: "decimal(19,4)" }
+      - { name: modified_date, type: timestamp }
+  productmodel:
+    source_file: ProductModel.csv
+    target_table: productmodel
+    delimiter: "+|"
+    row_terminator_marker: "&|"
+    columns:
+      - { name: product_model_id, type: int }
+      - { name: name, type: string }
+      - { name: catalog_description, type: string }
+      - { name: instructions, type: string }
+      - { name: rowguid, type: string }
+      - { name: modified_date, type: timestamp }
+  productmodelillustration:
+    source_file: ProductModelIllustration.csv
+    target_table: productmodelillustration
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: product_model_id, type: int }
+      - { name: illustration_id, type: int }
+      - { name: modified_date, type: timestamp }
+  productmodelproductdescriptionculture:
+    source_file: ProductModelProductDescriptionCulture.csv
+    target_table: productmodelproductdescriptionculture
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: product_model_id, type: int }
+      - { name: product_description_id, type: int }
+      - { name: culture_id, type: string }
+      - { name: modified_date, type: timestamp }
+  productphoto:
+    source_file: ProductPhoto.csv
+    target_table: productphoto
+    delimiter: "+|"
+    row_terminator_marker: "&|"
+    columns:
+      - { name: product_photo_id, type: int }
+      - { name: thumb_nail_photo, type: string }
+      - { name: thumbnail_photo_file_name, type: string }
+      - { name: large_photo, type: string }
+      - { name: large_photo_file_name, type: string }
+      - { name: modified_date, type: timestamp }
+  productproductphoto:
+    source_file: ProductProductPhoto.csv
+    target_table: productproductphoto
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: product_id, type: int }
+      - { name: product_photo_id, type: int }
+      - { name: primary, type: int }
+      - { name: modified_date, type: timestamp }
+  productsubcategory:
+    source_file: ProductSubcategory.csv
+    target_table: productsubcategory
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: product_subcategory_id, type: int }
+      - { name: product_category_id, type: int }
+      - { name: name, type: string }
+      - { name: rowguid, type: string }
+      - { name: modified_date, type: timestamp }
+  productvendor:
+    source_file: ProductVendor.csv
+    target_table: productvendor
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: product_id, type: int }
+      - { name: business_entity_id, type: int }
+      - { name: average_lead_time, type: int }
+      - { name: standard_price, type: "decimal(19,4)" }
+      - { name: last_receipt_cost, type: "decimal(19,4)" }
+      - { name: last_receipt_date, type: timestamp }
+      - { name: min_order_qty, type: int }
+      - { name: max_order_qty, type: int }
+      - { name: on_order_qty, type: int }
+      - { name: unit_measure_code, type: string }
+      - { name: modified_date, type: timestamp }
+  purchaseorderdetail:
+    source_file: PurchaseOrderDetail.csv
+    target_table: purchaseorderdetail
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: purchase_order_id, type: int }
+      - { name: purchase_order_detail_id, type: int }
+      - { name: due_date, type: timestamp }
+      - { name: order_qty, type: int }
+      - { name: product_id, type: int }
+      - { name: unit_price, type: "decimal(19,4)" }
+      - { name: line_total, type: "decimal(19,4)" }
+      - { name: received_qty, type: "decimal(8,2)" }
+      - { name: rejected_qty, type: "decimal(8,2)" }
+      - { name: stocked_qty, type: "decimal(8,2)" }
+      - { name: modified_date, type: timestamp }
+  purchaseorderheader:
+    source_file: PurchaseOrderHeader.csv
+    target_table: purchaseorderheader
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: purchase_order_id, type: int }
+      - { name: revision_number, type: int }
+      - { name: status, type: int }
+      - { name: employee_id, type: int }
+      - { name: vendor_id, type: int }
+      - { name: ship_method_id, type: int }
+      - { name: order_date, type: timestamp }
+      - { name: ship_date, type: timestamp }
+      - { name: sub_total, type: "decimal(19,4)" }
+      - { name: tax_amt, type: "decimal(19,4)" }
+      - { name: freight, type: "decimal(19,4)" }
+      - { name: total_due, type: "decimal(19,4)" }
+      - { name: modified_date, type: timestamp }
+  salesorderheadersalesreason:
+    source_file: SalesOrderHeaderSalesReason.csv
+    target_table: salesorderheadersalesreason
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: sales_order_id, type: int }
+      - { name: sales_reason_id, type: int }
+      - { name: modified_date, type: timestamp }
+  salesperson:
+    source_file: SalesPerson.csv
+    target_table: salesperson
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: business_entity_id, type: int }
+      - { name: territory_id, type: int }
+      - { name: sales_quota, type: "decimal(19,4)" }
+      - { name: bonus, type: "decimal(19,4)" }
+      - { name: commission_pct, type: "decimal(10,4)" }
+      - { name: sales_ytd, type: "decimal(19,4)" }
+      - { name: sales_last_year, type: "decimal(19,4)" }
+      - { name: rowguid, type: string }
+      - { name: modified_date, type: timestamp }
+  salespersonquotahistory:
+    source_file: SalesPersonQuotaHistory.csv
+    target_table: salespersonquotahistory
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: business_entity_id, type: int }
+      - { name: quota_date, type: timestamp }
+      - { name: sales_quota, type: "decimal(19,4)" }
+      - { name: rowguid, type: string }
+      - { name: modified_date, type: timestamp }
+  salesreason:
+    source_file: SalesReason.csv
+    target_table: salesreason
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: sales_reason_id, type: int }
+      - { name: name, type: string }
+      - { name: reason_type, type: string }
+      - { name: modified_date, type: timestamp }
+  salestaxrate:
+    source_file: SalesTaxRate.csv
+    target_table: salestaxrate
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: sales_tax_rate_id, type: int }
+      - { name: state_province_id, type: int }
+      - { name: tax_type, type: int }
+      - { name: tax_rate, type: "decimal(10,4)" }
+      - { name: name, type: string }
+      - { name: rowguid, type: string }
+      - { name: modified_date, type: timestamp }
+  salesterritory:
+    source_file: SalesTerritory.csv
+    target_table: salesterritory
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: territory_id, type: int }
+      - { name: name, type: string }
+      - { name: country_region_code, type: string }
+      - { name: group, type: string }
+      - { name: sales_ytd, type: "decimal(19,4)" }
+      - { name: sales_last_year, type: "decimal(19,4)" }
+      - { name: cost_ytd, type: "decimal(19,4)" }
+      - { name: cost_last_year, type: "decimal(19,4)" }
+      - { name: rowguid, type: string }
+      - { name: modified_date, type: timestamp }
+  salesterritoryhistory:
+    source_file: SalesTerritoryHistory.csv
+    target_table: salesterritoryhistory
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: business_entity_id, type: int }
+      - { name: territory_id, type: int }
+      - { name: start_date, type: timestamp }
+      - { name: end_date, type: timestamp }
+      - { name: rowguid, type: string }
+      - { name: modified_date, type: timestamp }
+  scrapreason:
+    source_file: ScrapReason.csv
+    target_table: scrapreason
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: scrap_reason_id, type: int }
+      - { name: name, type: string }
+      - { name: modified_date, type: timestamp }
+  shift:
+    source_file: Shift.csv
+    target_table: shift
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: shift_id, type: int }
+      - { name: name, type: string }
+      - { name: start_time, type: string }
+      - { name: end_time, type: string }
+      - { name: modified_date, type: timestamp }
+  shipmethod:
+    source_file: ShipMethod.csv
+    target_table: shipmethod
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: ship_method_id, type: int }
+      - { name: name, type: string }
+      - { name: ship_base, type: "decimal(19,4)" }
+      - { name: ship_rate, type: "decimal(19,4)" }
+      - { name: rowguid, type: string }
+      - { name: modified_date, type: timestamp }
+  shoppingcartitem:
+    source_file: ShoppingCartItem.csv
+    target_table: shoppingcartitem
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: shopping_cart_item_id, type: int }
+      - { name: shopping_cart_id, type: string }
+      - { name: quantity, type: int }
+      - { name: product_id, type: int }
+      - { name: date_created, type: timestamp }
+      - { name: modified_date, type: timestamp }
+  specialoffer:
+    source_file: SpecialOffer.csv
+    target_table: specialoffer
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: special_offer_id, type: int }
+      - { name: description, type: string }
+      - { name: discount_pct, type: "decimal(10,4)" }
+      - { name: type, type: string }
+      - { name: category, type: string }
+      - { name: start_date, type: timestamp }
+      - { name: end_date, type: timestamp }
+      - { name: min_qty, type: int }
+      - { name: max_qty, type: int }
+      - { name: rowguid, type: string }
+      - { name: modified_date, type: timestamp }
+  specialofferproduct:
+    source_file: SpecialOfferProduct.csv
+    target_table: specialofferproduct
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: special_offer_id, type: int }
+      - { name: product_id, type: int }
+      - { name: rowguid, type: string }
+      - { name: modified_date, type: timestamp }
+  stateprovince:
+    source_file: StateProvince.csv
+    target_table: stateprovince
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: state_province_id, type: int }
+      - { name: state_province_code, type: string }
+      - { name: country_region_code, type: string }
+      - { name: is_only_state_province_flag, type: int }
+      - { name: name, type: string }
+      - { name: territory_id, type: int }
+      - { name: rowguid, type: string }
+      - { name: modified_date, type: timestamp }
+  store:
+    source_file: Store.csv
+    target_table: store
+    delimiter: "+|"
+    row_terminator_marker: "&|"
+    columns:
+      - { name: business_entity_id, type: int }
+      - { name: name, type: string }
+      - { name: sales_person_id, type: int }
+      - { name: demographics, type: string }
+      - { name: rowguid, type: string }
+      - { name: modified_date, type: timestamp }
+  transactionhistory:
+    source_file: TransactionHistory.csv
+    target_table: transactionhistory
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: transaction_id, type: int }
+      - { name: product_id, type: int }
+      - { name: reference_order_id, type: int }
+      - { name: reference_order_line_id, type: int }
+      - { name: transaction_date, type: timestamp }
+      - { name: transaction_type, type: string }
+      - { name: quantity, type: int }
+      - { name: actual_cost, type: "decimal(19,4)" }
+      - { name: modified_date, type: timestamp }
+  transactionhistoryarchive:
+    source_file: TransactionHistoryArchive.csv
+    target_table: transactionhistoryarchive
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: transaction_id, type: int }
+      - { name: product_id, type: int }
+      - { name: reference_order_id, type: int }
+      - { name: reference_order_line_id, type: int }
+      - { name: transaction_date, type: timestamp }
+      - { name: transaction_type, type: string }
+      - { name: quantity, type: int }
+      - { name: actual_cost, type: "decimal(19,4)" }
+      - { name: modified_date, type: timestamp }
+  unitmeasure:
+    source_file: UnitMeasure.csv
+    target_table: unitmeasure
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: unit_measure_code, type: string }
+      - { name: name, type: string }
+      - { name: modified_date, type: timestamp }
+  vendor:
+    source_file: Vendor.csv
+    target_table: vendor
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: business_entity_id, type: int }
+      - { name: account_number, type: string }
+      - { name: name, type: string }
+      - { name: credit_rating, type: int }
+      - { name: preferred_vendor_status, type: int }
+      - { name: active_flag, type: int }
+      - { name: purchasing_web_service_url, type: string }
+      - { name: modified_date, type: timestamp }
+  workorder:
+    source_file: WorkOrder.csv
+    target_table: workorder
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: work_order_id, type: int }
+      - { name: product_id, type: int }
+      - { name: order_qty, type: int }
+      - { name: stocked_qty, type: int }
+      - { name: scrapped_qty, type: int }
+      - { name: start_date, type: timestamp }
+      - { name: end_date, type: timestamp }
+      - { name: due_date, type: timestamp }
+      - { name: scrap_reason_id, type: int }
+      - { name: modified_date, type: timestamp }
+  workorderrouting:
+    source_file: WorkOrderRouting.csv
+    target_table: workorderrouting
+    delimiter: "\t"
+    row_terminator_marker: null
+    columns:
+      - { name: work_order_id, type: int }
+      - { name: product_id, type: int }
+      - { name: operation_sequence, type: int }
+      - { name: location_id, type: int }
+      - { name: scheduled_start_date, type: timestamp }
+      - { name: scheduled_end_date, type: timestamp }
+      - { name: actual_start_date, type: timestamp }
+      - { name: actual_end_date, type: timestamp }
+      - { name: actual_resource_hrs, type: "decimal(9,4)" }
+      - { name: planned_cost, type: "decimal(19,4)" }
+      - { name: actual_cost, type: "decimal(19,4)" }
       - { name: modified_date, type: timestamp }
