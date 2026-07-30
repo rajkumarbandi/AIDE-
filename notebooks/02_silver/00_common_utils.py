@@ -30,6 +30,7 @@
 # COMMAND ----------
 
 import logging
+import time
 
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
@@ -73,6 +74,27 @@ DEFAULT_SILVER_SCHEMA = "silver"
 # Dropped from every Silver table: a SQL Server replication artifact with zero
 # analytical value, present on nearly every AdventureWorks Bronze table.
 TECHNICAL_COLUMNS_TO_DROP = ["rowguid"]
+
+# COMMAND ----------
+
+# MAGIC %md ## Helper functions — execution timing
+# MAGIC
+# MAGIC Two plain functions, not a decorator or context manager — every notebook already
+# MAGIC has a `main()` with a clear start/end, so `start = start_execution_timer()` /
+# MAGIC `get_elapsed_seconds(start)` at the two ends of it is all that's needed.
+
+# COMMAND ----------
+
+
+def start_execution_timer() -> float:
+    """Start a lightweight execution timer. Pair with get_elapsed_seconds()."""
+    return time.perf_counter()
+
+
+def get_elapsed_seconds(start_time: float) -> float:
+    """Return elapsed seconds since `start_time` (from start_execution_timer())."""
+    return time.perf_counter() - start_time
+
 
 # COMMAND ----------
 
