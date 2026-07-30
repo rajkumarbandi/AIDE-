@@ -8,6 +8,7 @@ in the notebooks.
 
 APP_TITLE = "AIDE — AI Data Engineering Assistant"
 APP_ICON = "🧠"
+APP_VERSION = "2.0.0"
 
 # Warehouse defaults — same catalog/schema names the notebooks write to.
 DEFAULT_CATALOG = "aide"

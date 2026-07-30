@@ -6,14 +6,36 @@ from st.secrets, never hardcoded.
 """
 
 import logging
+import time
+from typing import Tuple
 
 import pandas as pd
+import sqlparse
 import streamlit as st
 from databricks import sql as databricks_sql
 
 from utils.config import DATA_CACHE_TTL_SECONDS
 
 logger = logging.getLogger("aide.databricks")
+
+# databricks-sql-connector's _socket_timeout defaults to None (no timeout) for
+# socket send/recv/connect — verified via Connection.__init__'s internal-kwargs
+# docstring. Without this, an unreachable host or a stalled warehouse hangs the
+# connection indefinitely, and since get_connection() is @st.cache_resource,
+# that hang blocks every user sharing this cached connection, not just one page.
+_CONNECTION_TIMEOUT_SECONDS = 30
+
+# Verified against sqlparse 0.5.3: get_type() classifies the statement's DML
+# kind (SELECT/INSERT/UPDATE/...), and flatten() walks every leaf token
+# (including inside subqueries/CTEs) so a forbidden keyword can't hide in a
+# nested clause. Exact-value comparison (not substring) means a comment or
+# identifier merely containing e.g. "drop" never false-positives.
+_FORBIDDEN_KEYWORDS = frozenset(
+    {
+        "DROP", "DELETE", "TRUNCATE", "UPDATE", "INSERT", "ALTER", "CREATE",
+        "GRANT", "REVOKE", "MERGE", "EXEC", "EXECUTE", "REPLACE",
+    }
+)
 
 
 class DatabricksConnectionError(Exception):
@@ -22,6 +44,34 @@ class DatabricksConnectionError(Exception):
 
 class DatabricksQueryError(Exception):
     """Raised when a query fails to execute."""
+
+
+class UnsafeQueryError(Exception):
+    """Raised when a query isn't a single, plain SELECT statement — SQL
+    Playground and the AI Assistant are read-only surfaces.
+    """
+
+
+def validate_select_only(sql: str) -> None:
+    """Raise UnsafeQueryError unless `sql` is exactly one SELECT statement with
+    no forbidden DDL/DML keyword anywhere in it (including nested subqueries).
+    """
+    statements = [s for s in sqlparse.parse(sql) if s.tokens]
+    if not statements:
+        raise UnsafeQueryError("Empty query.")
+    if len(statements) > 1:
+        raise UnsafeQueryError("Only a single SELECT statement is allowed (no stacked queries).")
+
+    statement = statements[0]
+    if statement.get_type() != "SELECT":
+        raise UnsafeQueryError(
+            f"Only SELECT queries are allowed here (detected: {statement.get_type()})."
+        )
+
+    tokens = {t.value.upper() for t in statement.flatten() if t.ttype is not None}
+    forbidden_hit = tokens & _FORBIDDEN_KEYWORDS
+    if forbidden_hit:
+        raise UnsafeQueryError(f"Query contains a forbidden keyword: {', '.join(forbidden_hit)}.")
 
 
 def _get_connection_params() -> dict:
@@ -44,7 +94,7 @@ def get_connection():
     """Return a cached Databricks SQL connection, created once per app session."""
     params = _get_connection_params()
     try:
-        return databricks_sql.connect(**params)
+        return databricks_sql.connect(**params, _socket_timeout=_CONNECTION_TIMEOUT_SECONDS)
     except Exception as exc:
         logger.error("Failed to connect to Databricks: %s", exc)
         raise DatabricksConnectionError(f"Could not connect to Databricks: {exc}") from exc
@@ -69,6 +119,16 @@ def run_query(sql: str) -> pd.DataFrame:
     except Exception as exc:
         logger.error("Query failed: %s | sql=%s", exc, sql)
         raise DatabricksQueryError(f"Query failed: {exc}") from exc
+
+
+def run_query_timed(sql: str) -> Tuple[pd.DataFrame, float]:
+    """run_query() plus wall-clock elapsed seconds, for the SQL Playground's
+    "Execution Time" display. A near-zero time on a repeat query correctly
+    reflects a cache hit, not a bug.
+    """
+    start = time.perf_counter()
+    df = run_query(sql)
+    return df, time.perf_counter() - start
 
 
 def is_connected() -> bool:

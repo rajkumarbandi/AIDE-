@@ -14,10 +14,15 @@ import streamlit as st
 def render_dataframe(
     df: Optional[pd.DataFrame],
     empty_message: str = "No data available yet.",
-    height: Optional[int] = None,
+    height: Optional[int] = "auto",
     **st_dataframe_kwargs,
 ) -> None:
-    """Render `df` via st.dataframe, or a consistent empty state if it's None/empty."""
+    """Render `df` via st.dataframe, or a consistent empty state if it's None/empty.
+
+    `height="auto"` (content-fit) is st.dataframe's real default in the
+    installed Streamlit version — verified directly, since plain `None` (the
+    natural-looking default) raises StreamlitInvalidHeightError here.
+    """
     if df is None or df.empty:
         render_empty_state(empty_message)
         return

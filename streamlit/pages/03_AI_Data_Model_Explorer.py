@@ -1,7 +1,7 @@
 """AI Data Model Explorer — the flagship feature.
 
 An interactive Bronze -> Silver -> Gold warehouse graph. Nodes and edges are
-built from real sources only (see "Do not fake relationships" in the brief):
+built from real sources only:
   - Nodes: metadata.table_metadata (Bronze, live query) unioned with the known
     Silver/Gold table names (real — from having built those notebooks — but
     not yet AI-analyzed; see utils/queries.py KNOWN_SILVER_TABLES/KNOWN_GOLD_TABLES).
@@ -10,12 +10,13 @@ built from real sources only (see "Do not fake relationships" in the brief):
     read_bronze_table()/read_silver_table()/join() call in the actual
     Silver/Gold notebooks, not invented.
 
-Foundation scope: the graph itself, PK/FK/lineage/sample-SQL derivation, and
-"Explain this table" (reusing already-stored AI analysis) are real and
-working now. "Explain this relationship", "Generate SQL", and "Impact
-Analysis" are scaffolded as clearly-labeled Phase 2 capabilities — they need
-either a live Gemini call or warehouse-wide dependency analysis this
-foundation phase intentionally doesn't build yet.
+Search filters the graph to matching tables plus their direct neighbors.
+Layer checkboxes give a real collapse/expand mechanic. Node detail covers
+description, live columns, keys/relationships, lineage, a real (non-AI)
+impact analysis derived from the dependency graph, a live data preview, and
+suggested SQL. "Explain this relationship" is a genuine Gemini call grounded
+in the real relationship description, clearly distinguished from the
+deterministic graph facts around it.
 """
 
 from typing import Optional
@@ -27,8 +28,11 @@ import streamlit as st
 from components.filters import get_filters
 from components.graph import build_graph, render_graph, render_legend
 from components.header import render_page_header
-from components.tables import render_empty_state
+from components.tables import render_dataframe, render_empty_state
+from utils.config import DEFAULT_BRONZE_SCHEMA, DEFAULT_GOLD_SCHEMA, DEFAULT_SILVER_SCHEMA
 from utils.databricks import DatabricksConnectionError, DatabricksQueryError, run_query
+from utils.gemini import GeminiClientError, GeminiConfigurationError, explain_relationship
+from utils.helpers import to_plain_list
 from utils.queries import (
     GOLD_LINEAGE,
     GOLD_RELATIONSHIPS,
@@ -36,14 +40,31 @@ from utils.queries import (
     KNOWN_SILVER_TABLES,
     SILVER_LINEAGE,
     sql_ai_analysis,
+    sql_information_schema_columns,
+    sql_preview_table,
     sql_table_metadata,
 )
 
 render_page_header(
     title="AI Data Model Explorer",
     description="An interactive Bronze → Silver → Gold warehouse graph — click any "
-    "table to see its AI-generated description, keys, relationships, and lineage.",
+    "table to see its AI-generated description, keys, relationships, lineage, and "
+    "impact analysis.",
     breadcrumb=["Home", "AI Data Model Explorer"],
+)
+
+_LAYER_SCHEMAS = {
+    "bronze": DEFAULT_BRONZE_SCHEMA,
+    "silver": DEFAULT_SILVER_SCHEMA,
+    "gold": DEFAULT_GOLD_SCHEMA,
+}
+
+# fact_sales + these four dims are the real, verified inputs to
+# 03_gold/07_sales_dashboard.py's sales_kpi_summary build (compute_* functions
+# read exactly these five DataFrames) — used for a grounded, non-fabricated
+# Impact Analysis statement, not a guess.
+_KPI_DEPENDENT_TABLES = frozenset(
+    {"fact_sales", "dim_customer", "dim_product", "dim_territory", "dim_salesperson"}
 )
 
 
@@ -130,12 +151,68 @@ def _suggested_join_sql(graph: nx.DiGraph, node_id: str) -> list:
     return statements
 
 
+def _filter_by_search(nodes: list, edges: list, search: str) -> tuple:
+    """Reduce the graph to matching tables plus their direct (1-hop) neighbors —
+    without this, a search on a 69+ table warehouse graph is nearly useless.
+    """
+    if not search:
+        return nodes, edges
+    node_ids = {n["id"] for n in nodes}
+    matches = {nid for nid in node_ids if search.lower() in nid.lower()}
+    if not matches:
+        return [], []
+    neighbors = set(matches)
+    for edge in edges:
+        if edge["source"] in matches:
+            neighbors.add(edge["target"])
+        if edge["target"] in matches:
+            neighbors.add(edge["source"])
+    filtered_nodes = [n for n in nodes if n["id"] in neighbors]
+    filtered_edges = [e for e in edges if e["source"] in neighbors and e["target"] in neighbors]
+    return filtered_nodes, filtered_edges
+
+
+def _filter_by_layer(nodes: list, edges: list, visible_layers: set) -> tuple:
+    """Collapse/expand mechanic: hide whole medallion layers."""
+    filtered_nodes = [n for n in nodes if n.get("layer") in visible_layers]
+    visible_ids = {n["id"] for n in filtered_nodes}
+    filtered_edges = [e for e in edges if e["source"] in visible_ids and e["target"] in visible_ids]
+    return filtered_nodes, filtered_edges
+
+
+def _render_impact_analysis(graph: nx.DiGraph, node_id: str) -> None:
+    downstream = _downstream_lineage(graph, node_id)
+    if not downstream:
+        render_empty_state(
+            "Nothing downstream — this table is a terminal node in the current graph "
+            "(nothing reads from it, per the lineage/relationship registries).",
+            icon="✅",
+        )
+        return
+
+    st.markdown(
+        f"**{len(downstream)} table(s) would be affected** if `{node_id}`'s schema or "
+        "contents changed — every table reachable from it in the Bronze→Silver→Gold "
+        "dependency graph:"
+    )
+    for table in downstream:
+        st.markdown(f"- `{table}`")
+
+    if node_id in _KPI_DEPENDENT_TABLES or _KPI_DEPENDENT_TABLES & set(downstream):
+        st.warning(
+            "⚠ Includes `fact_sales` and/or its dimensions — a change here can reach "
+            "`sales_kpi_summary` and the Executive Dashboard's headline KPIs "
+            "(verified against 03_gold/07_sales_dashboard.py's actual inputs)."
+        )
+
+
 def _render_node_detail(
     graph: nx.DiGraph, node_id: str, metadata_df: Optional[pd.DataFrame], catalog: str
 ) -> None:
     node_data = graph.nodes[node_id]
+    layer = node_data.get("layer", "bronze")
     st.subheader(f"📄 {node_id}")
-    st.caption(f"Layer: {node_data.get('layer', '—')} · Kind: {node_data.get('kind', '—')}")
+    st.caption(f"Layer: {layer} · Kind: {node_data.get('kind', '—')}")
 
     meta_row = None
     if metadata_df is not None and not metadata_df.empty:
@@ -145,8 +222,8 @@ def _render_node_detail(
 
     tabs = st.tabs(
         [
-            "AI Description", "Keys & Relationships", "Lineage", "Suggested SQL",
-            "Common KPIs & Use Cases",
+            "AI Description", "Columns", "Keys & Relationships", "Lineage",
+            "Impact Analysis", "Data Preview", "Suggested SQL",
         ]
     )
 
@@ -170,78 +247,121 @@ def _render_node_detail(
                        "stored in metadata.ai_analysis for this table.")
 
     with tabs[1]:
+        schema = _LAYER_SCHEMAS.get(layer, DEFAULT_BRONZE_SCHEMA)
+        try:
+            columns_df = run_query(sql_information_schema_columns(catalog, schema, node_id))
+            render_dataframe(columns_df, empty_message="No column metadata available.")
+        except (DatabricksConnectionError, DatabricksQueryError) as exc:
+            st.error(f"Could not load columns: {exc}")
+
+    with tabs[2]:
         if meta_row is not None:
-            pk_candidates = meta_row.get("primary_key_candidates") or "—"
-            st.markdown(f"**Primary Key Candidates:** {pk_candidates}")
+            pk_candidates = to_plain_list(meta_row.get("primary_key_candidates"))
+            st.markdown(f"**Primary Key Candidates:** {', '.join(pk_candidates) or '—'}")
         else:
             st.markdown("**Primary Key Candidates:** _not yet collected for this table_")
         related = _related_tables(graph, node_id)
         st.markdown(f"**Related Tables:** {', '.join(related) if related else '—'}")
         st.markdown("**Relationships:**")
+        has_relationship = False
         for rel in GOLD_RELATIONSHIPS:
             if node_id in (rel["from_table"], rel["to_table"]):
+                has_relationship = True
                 st.markdown(f"- `{rel['from_table']}.{rel['from_column']}` → "
                             f"`{rel['to_table']}.{rel['to_column']}` — {rel['description']}")
+        if not has_relationship:
+            st.caption("No declared Gold-layer relationships for this table.")
 
-    with tabs[2]:
+    with tabs[3]:
         upstream = _upstream_lineage(graph, node_id)
         downstream = _downstream_lineage(graph, node_id)
         col1, col2 = st.columns(2)
         with col1:
             st.markdown("**⬆ Upstream Lineage**")
             if upstream:
-                upstream_text = "\n".join(f"- {t}" for t in upstream)
+                st.markdown("\n".join(f"- {t}" for t in upstream))
             else:
-                upstream_text = "_None — this is a source table._"
-            st.markdown(upstream_text)
+                st.markdown("_None — this is a source table._")
         with col2:
             st.markdown("**⬇ Downstream Lineage**")
             if downstream:
-                downstream_text = "\n".join(f"- {t}" for t in downstream)
+                st.markdown("\n".join(f"- {t}" for t in downstream))
             else:
-                downstream_text = "_Nothing depends on this table yet._"
-            st.markdown(downstream_text)
+                st.markdown("_Nothing depends on this table yet._")
 
-    with tabs[3]:
+    with tabs[4]:
+        _render_impact_analysis(graph, node_id)
+
+    with tabs[5]:
+        schema = _LAYER_SCHEMAS.get(layer, DEFAULT_BRONZE_SCHEMA)
+        try:
+            preview_df = run_query(sql_preview_table(catalog, schema, node_id, limit=20))
+            render_dataframe(preview_df, empty_message="This table has no rows yet.")
+        except (DatabricksConnectionError, DatabricksQueryError) as exc:
+            st.error(f"Could not load a data preview: {exc}")
+
+    with tabs[6]:
         joins = _suggested_join_sql(graph, node_id)
         if joins:
             for sql_text in joins:
                 st.code(sql_text, language="sql")
         else:
-            st.code(f"SELECT * FROM {catalog}.<schema>.{node_id} LIMIT 100", language="sql")
-
-    with tabs[4]:
-        st.info("Common KPIs and business use cases will be AI-generated in the next "
-                "implementation phase, using this table's stored ai_analysis content "
-                "plus its graph position.")
+            schema = _LAYER_SCHEMAS.get(layer, DEFAULT_BRONZE_SCHEMA)
+            st.code(f"SELECT * FROM {catalog}.{schema}.{node_id} LIMIT 100", language="sql")
 
 
-def _render_edge_detail(rel_source: str, rel_target: str) -> None:
+def _render_edge_detail(rel_source: str, rel_target: str, graph: nx.DiGraph) -> None:
     st.subheader(f"🔗 {rel_source} → {rel_target}")
     matching = [
         rel for rel in GOLD_RELATIONSHIPS
         if rel["from_table"] == rel_source and rel["to_table"] == rel_target
     ]
+    description = None
     if matching:
         rel = matching[0]
-        st.markdown(rel["description"])
+        description = rel["description"]
+        st.markdown(description)
         st.code(
             f"SELECT *\nFROM {rel['from_table']} f\nJOIN {rel['to_table']} d\n"
             f"  ON f.{rel['from_column']} = d.{rel['to_column']}",
             language="sql",
         )
     else:
+        description = (
+            f"'{rel_source}' feeds '{rel_target}' as part of the medallion build — the "
+            "source table's transformation output becomes this target table."
+        )
         st.markdown("This is a Bronze → Silver or Silver → Gold lineage edge — the source "
                     "table feeds the target table's transformation.")
 
-    st.markdown("**Impact Analysis** _(coming in the next phase)_")
-    st.caption(
-        "Will show: if a column on the source table changes, which downstream tables, "
-        "dashboards, and KPIs are affected."
-    )
+    if st.button("🤖 Explain this relationship in plain English", key=f"explain_rel_{rel_source}_{rel_target}"):
+        with st.spinner("Asking Gemini..."):
+            try:
+                st.info(explain_relationship(description))
+            except GeminiConfigurationError:
+                st.error("Gemini isn't configured yet — see ⚙ Settings.")
+            except GeminiClientError as exc:
+                st.error(f"Could not generate an explanation: {exc}")
+
+    st.markdown("**Impact Analysis**")
+    if rel_target in graph.nodes:
+        _render_impact_analysis(graph, rel_target)
 
 
 filters = get_filters()
+
+col_search, col_bronze, col_silver, col_gold = st.columns([3, 1, 1, 1])
+with col_search:
+    search = st.text_input(
+        "🔍 Search tables", placeholder="e.g. customer — shows matches + direct neighbors"
+    )
+with col_bronze:
+    show_bronze = st.checkbox("Bronze", value=True, key="aide_show_bronze")
+with col_silver:
+    show_silver = st.checkbox("Silver", value=True, key="aide_show_silver")
+with col_gold:
+    show_gold = st.checkbox("Gold", value=True, key="aide_show_gold")
+
 render_legend()
 
 metadata_df = _load_bronze_metadata(filters["catalog"])
@@ -250,13 +370,23 @@ if metadata_df is None:
                "structure only, without live Bronze metadata. Connect in ⚙ Settings for "
                "the full picture.")
 
-nodes = _build_nodes(metadata_df)
-node_ids = {n["id"] for n in nodes}
-edges = _build_edges(node_ids)
+all_nodes = _build_nodes(metadata_df)
+all_node_ids = {n["id"] for n in all_nodes}
+all_edges = _build_edges(all_node_ids)
+
+visible_layers = {layer for layer, show in
+                   [("bronze", show_bronze), ("silver", show_silver), ("gold", show_gold)] if show}
+nodes, edges = _filter_by_layer(all_nodes, all_edges, visible_layers)
+nodes, edges = _filter_by_search(nodes, edges, search)
 
 if not nodes:
-    render_empty_state("No warehouse structure available yet.", icon="🧠")
+    render_empty_state(
+        "No tables match the current search/layer filters." if (search or len(visible_layers) < 3)
+        else "No warehouse structure available yet.",
+        icon="🧠",
+    )
 else:
+    st.caption(f"Showing {len(nodes)} of {len(all_nodes)} tables")
     graph = build_graph(nodes, edges)
     selected_node = st.session_state.get("aide_selected_node")
 
@@ -271,11 +401,13 @@ else:
 
     st.divider()
 
-    if st.session_state.get("aide_selected_edge"):
-        source, target = st.session_state["aide_selected_edge"]
-        _render_edge_detail(source, target)
-    elif st.session_state.get("aide_selected_node"):
-        selected_id = st.session_state["aide_selected_node"]
+    selected_edge = st.session_state.get("aide_selected_edge")
+    selected_id = st.session_state.get("aide_selected_node")
+
+    if selected_edge and selected_edge[0] in graph.nodes and selected_edge[1] in graph.nodes:
+        source, target = selected_edge
+        _render_edge_detail(source, target, graph)
+    elif selected_id and selected_id in graph.nodes:
         _render_node_detail(graph, selected_id, metadata_df, filters["catalog"])
     else:
         st.caption("👆 Click any table above to see its details, or click a connecting "

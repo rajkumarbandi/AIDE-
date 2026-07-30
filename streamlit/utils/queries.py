@@ -50,6 +50,230 @@ def sql_preview_table(catalog: str, schema: str, table_name: str, limit: int = 5
     return f"SELECT * FROM {catalog}.{schema}.{table_name} LIMIT {int(limit)}"
 
 
+def sql_information_schema_columns(catalog: str, schema: str, table_name: str) -> str:
+    """Column name/type/nullability for one table — real Unity Catalog metadata,
+    used by the AI Data Catalog's column detail view and Warehouse Explorer's
+    profiling.
+    """
+    return (
+        "SELECT column_name, data_type, is_nullable, ordinal_position "
+        f"FROM {catalog}.information_schema.columns "
+        f"WHERE table_schema = '{schema}' AND table_name = '{table_name}' "
+        "ORDER BY ordinal_position"
+    )
+
+
+def sql_column_profile(catalog: str, schema: str, table_name: str, columns: list) -> str:
+    """One-pass null-count + approximate-distinct-count profile for every column.
+
+    Uses approx_count_distinct (not the notebooks' exact collect_set approach) —
+    a deliberate difference: this runs on-demand against an arbitrary,
+    potentially large table from an interactive UI, where responsiveness matters
+    more than exactness (unlike the warehouse build, which profiles known,
+    bounded AdventureWorks tables once per batch run).
+    """
+    metrics = ["COUNT(*) AS total_rows"]
+    for column in columns:
+        metrics.append(f"SUM(CASE WHEN `{column}` IS NULL THEN 1 ELSE 0 END) AS `{column}__nulls`")
+        metrics.append(f"approx_count_distinct(`{column}`) AS `{column}__distinct`")
+    return f"SELECT {', '.join(metrics)} FROM {catalog}.{schema}.{table_name}"
+
+
+def sql_schema_columns(catalog: str, schema: str) -> str:
+    """Every table.column in one schema, in one query — used to build the AI
+    Assistant's real, live schema-grounding context for NL-to-SQL generation
+    (never a static/guessed table list).
+    """
+    return (
+        "SELECT table_name, column_name, data_type "
+        f"FROM {catalog}.information_schema.columns "
+        f"WHERE table_schema = '{schema}' ORDER BY table_name, ordinal_position"
+    )
+
+
+def sql_column_sample_values(catalog: str, schema: str, table_name: str, column: str, limit: int = 10) -> str:
+    """Distinct, non-null sample values for one column — the Warehouse
+    Explorer's column-profiling "sample values" view.
+    """
+    return (
+        f"SELECT DISTINCT `{column}` AS sample_value "
+        f"FROM {catalog}.{schema}.{table_name} "
+        f"WHERE `{column}` IS NOT NULL LIMIT {int(limit)}"
+    )
+
+
+def sql_column_distribution(catalog: str, schema: str, table_name: str, column: str, limit: int = 15) -> str:
+    """Real value-frequency distribution for one column (top N by count) — the
+    Warehouse Explorer's column-profiling "distribution" chart.
+    """
+    return (
+        f"SELECT `{column}` AS value, COUNT(*) AS frequency "
+        f"FROM {catalog}.{schema}.{table_name} "
+        f"GROUP BY `{column}` ORDER BY frequency DESC LIMIT {int(limit)}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Executive Dashboard — fact_sales joined to every dimension, filterable by
+# year / territory / product category / salesperson.
+# ---------------------------------------------------------------------------
+
+
+def _fact_joins(catalog: str, gold_schema: str) -> str:
+    """The common FROM+JOIN block every dashboard query below builds on — kept
+    in one place so the five joins aren't repeated in every query function.
+    LEFT JOIN throughout: fact_sales' territory_key/salesperson_key resolve to
+    the "Unknown" (-1) dimension member for unassigned orders, but LEFT JOIN
+    degrades gracefully (a null territory/salesperson name, not a silently
+    dropped row) even if that Unknown member were ever missing.
+    """
+    g = f"{catalog}.{gold_schema}"
+    return (
+        f"FROM {g}.fact_sales f "
+        f"LEFT JOIN {g}.dim_date dd ON f.order_date_key = dd.date_key "
+        f"LEFT JOIN {g}.dim_customer dc ON f.customer_key = dc.customer_key "
+        f"LEFT JOIN {g}.dim_product dp ON f.product_key = dp.product_key "
+        f"LEFT JOIN {g}.dim_territory dt ON f.territory_key = dt.territory_key "
+        f"LEFT JOIN {g}.dim_salesperson ds ON f.salesperson_key = ds.salesperson_key"
+    )
+
+
+def _filter_conditions(filters: dict) -> list:
+    """Translate the global filter dict into SQL WHERE fragments — only for
+    dimensions with a real (non-"All") selection.
+    """
+    conditions = []
+    year = filters.get("year")
+    if year and year != "All":
+        conditions.append(f"dd.year = {int(year)}")
+    territory = filters.get("territory")
+    if territory and territory != "All":
+        conditions.append(f"dt.territory_name = '{territory.replace(chr(39), '')}'")
+    category = filters.get("product_category")
+    if category and category != "All":
+        conditions.append(f"dp.category_name = '{category.replace(chr(39), '')}'")
+    salesperson = filters.get("salesperson")
+    if salesperson and salesperson != "All":
+        conditions.append(f"ds.salesperson_name = '{salesperson.replace(chr(39), '')}'")
+    return conditions
+
+
+def _where_clause(conditions: list) -> str:
+    return f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+
+def sql_monthly_revenue_trend(catalog: str, gold_schema: str, filters: dict) -> str:
+    where = _where_clause(_filter_conditions(filters))
+    return (
+        "SELECT dd.year, dd.month, dd.month_name, SUM(f.line_total) AS revenue "
+        f"{_fact_joins(catalog, gold_schema)} {where} "
+        "GROUP BY dd.year, dd.month, dd.month_name ORDER BY dd.year, dd.month"
+    )
+
+
+def sql_quarterly_revenue(catalog: str, gold_schema: str, filters: dict) -> str:
+    where = _where_clause(_filter_conditions(filters))
+    return (
+        "SELECT dd.year, dd.quarter, SUM(f.line_total) AS revenue "
+        f"{_fact_joins(catalog, gold_schema)} {where} "
+        "GROUP BY dd.year, dd.quarter ORDER BY dd.year, dd.quarter"
+    )
+
+
+def sql_revenue_by_territory(catalog: str, gold_schema: str, filters: dict) -> str:
+    where = _where_clause(_filter_conditions(filters))
+    return (
+        "SELECT dt.territory_name, SUM(f.line_total) AS revenue, "
+        "COUNT(DISTINCT f.sales_order_id) AS orders "
+        f"{_fact_joins(catalog, gold_schema)} {where} "
+        "GROUP BY dt.territory_name ORDER BY revenue DESC"
+    )
+
+
+def sql_revenue_by_category(catalog: str, gold_schema: str, filters: dict) -> str:
+    where = _where_clause(_filter_conditions(filters))
+    return (
+        "SELECT dp.category_name, SUM(f.line_total) AS revenue "
+        f"{_fact_joins(catalog, gold_schema)} {where} "
+        "GROUP BY dp.category_name ORDER BY revenue DESC"
+    )
+
+
+def sql_top_products(catalog: str, gold_schema: str, filters: dict, top_n: int) -> str:
+    where = _where_clause(_filter_conditions(filters))
+    return (
+        "SELECT dp.product_name, dp.category_name, SUM(f.line_total) AS revenue, "
+        "SUM(f.order_qty) AS units_sold "
+        f"{_fact_joins(catalog, gold_schema)} {where} "
+        f"GROUP BY dp.product_name, dp.category_name ORDER BY revenue DESC LIMIT {int(top_n)}"
+    )
+
+
+def sql_top_customers(catalog: str, gold_schema: str, filters: dict, top_n: int) -> str:
+    where = _where_clause(_filter_conditions(filters))
+    return (
+        "SELECT dc.customer_name, dc.customer_type, SUM(f.line_total) AS revenue, "
+        "COUNT(DISTINCT f.sales_order_id) AS orders "
+        f"{_fact_joins(catalog, gold_schema)} {where} "
+        f"GROUP BY dc.customer_name, dc.customer_type ORDER BY revenue DESC LIMIT {int(top_n)}"
+    )
+
+
+def sql_order_trend(catalog: str, gold_schema: str, filters: dict) -> str:
+    where = _where_clause(_filter_conditions(filters))
+    return (
+        "SELECT dd.year, dd.month, dd.month_name, COUNT(DISTINCT f.sales_order_id) AS orders "
+        f"{_fact_joins(catalog, gold_schema)} {where} "
+        "GROUP BY dd.year, dd.month, dd.month_name ORDER BY dd.year, dd.month"
+    )
+
+
+def sql_customer_growth(catalog: str, gold_schema: str, filters: dict) -> str:
+    """New distinct customers per month (first order in that month) — a simple,
+    real growth signal, not a fabricated metric.
+    """
+    where = _where_clause(_filter_conditions(filters))
+    return (
+        "WITH first_orders AS ("
+        "SELECT dc.customer_key, MIN(dd.full_date) AS first_order_date "
+        f"{_fact_joins(catalog, gold_schema)} {where} GROUP BY dc.customer_key) "
+        "SELECT YEAR(first_order_date) AS year, MONTH(first_order_date) AS month, "
+        "COUNT(*) AS new_customers "
+        "FROM first_orders GROUP BY YEAR(first_order_date), MONTH(first_order_date) "
+        "ORDER BY year, month"
+    )
+
+
+def sql_distinct_years(catalog: str, gold_schema: str) -> str:
+    """Years that actually have sales — not dim_date's full generated range."""
+    g = f"{catalog}.{gold_schema}"
+    return (
+        f"SELECT DISTINCT dd.year FROM {g}.fact_sales f "
+        f"JOIN {g}.dim_date dd ON f.order_date_key = dd.date_key ORDER BY dd.year DESC"
+    )
+
+
+def sql_distinct_territories(catalog: str, gold_schema: str) -> str:
+    return (
+        f"SELECT territory_name FROM {catalog}.{gold_schema}.dim_territory "
+        "WHERE territory_key != -1 ORDER BY territory_name"
+    )
+
+
+def sql_distinct_categories(catalog: str, gold_schema: str) -> str:
+    return (
+        f"SELECT DISTINCT category_name FROM {catalog}.{gold_schema}.dim_product "
+        "WHERE category_name IS NOT NULL ORDER BY category_name"
+    )
+
+
+def sql_distinct_salespersons(catalog: str, gold_schema: str) -> str:
+    return (
+        f"SELECT salesperson_name FROM {catalog}.{gold_schema}.dim_salesperson "
+        "WHERE salesperson_key != -1 ORDER BY salesperson_name"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Warehouse relationship registry
 # ---------------------------------------------------------------------------
