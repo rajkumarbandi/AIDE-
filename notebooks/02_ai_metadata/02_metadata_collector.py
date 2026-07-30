@@ -39,10 +39,13 @@ from pyspark.sql import functions as F
 from pyspark.sql.types import (
     ArrayType,
     BooleanType,
+    DataType,
+    DateType,
     DoubleType,
     IntegerType,
     LongType,
     MapType,
+    NumericType,
     StringType,
     StructField,
     StructType,
@@ -68,7 +71,6 @@ logger = logging.getLogger("aide.metadata_collector")
 
 METADATA_SCHEMA = "metadata"
 METADATA_TABLE = "table_metadata"
-SAMPLE_SCAN_SIZE = 200
 SAMPLE_VALUES_PER_COLUMN = 5
 
 COLUMN_METADATA_SCHEMA = StructType(
@@ -81,6 +83,12 @@ COLUMN_METADATA_SCHEMA = StructType(
         StructField("null_count", LongType(), nullable=True),
         StructField("null_percentage", DoubleType(), nullable=True),
         StructField("sample_values", ArrayType(StringType()), nullable=True),
+        # New profiling fields (additive — existing fields/order above are unchanged).
+        StructField("min_value", StringType(), nullable=True),  # numeric/date/timestamp only
+        StructField("max_value", StringType(), nullable=True),  # numeric/date/timestamp only
+        StructField("min_length", IntegerType(), nullable=True),  # string columns only
+        StructField("max_length", IntegerType(), nullable=True),  # string columns only
+        StructField("average_length", DoubleType(), nullable=True),  # string columns only
     ]
 )
 
@@ -148,52 +156,115 @@ def get_column_base_metadata(df: DataFrame) -> list:
     ]
 
 
-def compute_column_statistics(df: DataFrame, columns: list) -> dict:
-    """Null count and approximate distinct count for every column, in a single
-    aggregation pass. `approx_count_distinct` (HyperLogLog) is used instead of an exact
-    countDistinct per column — the standard choice for profiling, since running many
-    exact distinct aggregates together in one pass scales poorly, while the approximate
-    version stays single-pass regardless of column count, at negligible accuracy cost.
+def is_numeric_or_temporal(data_type: DataType) -> bool:
+    """True for column types where min/max bounds are a meaningful statistic."""
+    return isinstance(data_type, (NumericType, DateType, TimestampType))
+
+
+def is_string_type(data_type: DataType) -> bool:
+    """True for column types where length statistics are a meaningful statistic."""
+    return isinstance(data_type, StringType)
+
+
+def build_profiling_expressions(schema_fields: list) -> list:
+    """Build every aggregate expression needed to profile a table, for use in one
+    single `.agg(...)` call (one Spark job, one physical scan of the table).
+
+    Distinct counts use `collect_set` (exact) rather than `countDistinct`/
+    `approx_count_distinct`:
+      - `approx_count_distinct` was the previous implementation and is the root cause
+        of distinct_count exceeding row_count (HyperLogLog is an estimate, not a
+        guarantee) — unacceptable once distinct_count feeds primary-key detection.
+      - Multiple exact `F.countDistinct(col)` calls over *different* columns in one
+        query trigger Spark's "expand" aggregation strategy, which duplicates rows per
+        distinct-column combination — expensive for a wide table. `collect_set` is a
+        plain (non DISTINCT-marked) aggregate, so many of them combine into a single
+        pass without that penalty.
+      - `size(collect_set(col))` can never exceed the row count by construction (it is
+        the exact count of distinct non-null values), which is the correctness
+        guarantee this whole change exists to provide.
+
+    Sample values are taken from the same pass (a second, string-cast `collect_set`
+    per column) rather than a separate bounded-row scan — removing what was previously
+    an extra full-table read per profiling run.
+
+    Trade-off: `collect_set` ships the full distinct value set back to the driver,
+    unlike `approx_count_distinct`'s tiny sketch. Fine at AdventureWorks Bronze scale
+    (tens of thousands of rows); a table with a very high-cardinality column (millions
+    of near-unique values) would need a hybrid approach — e.g. approximate first, exact
+    only when the approximate count is below a safe threshold.
     """
-    agg_exprs = []
-    for column in columns:
-        agg_exprs.append(F.approx_count_distinct(F.col(column)).alias(f"distinct__{column}"))
-        agg_exprs.append(
-            F.sum(F.when(F.col(column).isNull(), 1).otherwise(0)).alias(f"nulls__{column}")
+    exprs = [F.count(F.lit(1)).alias("__row_count__")]
+
+    for field_ in schema_fields:
+        column = field_.name
+        col_expr = F.col(column)
+
+        exprs.append(F.count(col_expr).alias(f"nonnull__{column}"))
+        exprs.append(F.size(F.collect_set(col_expr)).alias(f"distinct__{column}"))
+        exprs.append(
+            F.sort_array(F.collect_set(col_expr.cast("string"))).alias(f"samples__{column}")
         )
-    result: Row = df.agg(*agg_exprs).collect()[0]
 
-    stats = {}
-    for column in columns:
-        stats[column] = {
-            "distinct_count": result[f"distinct__{column}"],
-            "null_count": result[f"nulls__{column}"],
-        }
-    return stats
+        if is_numeric_or_temporal(field_.dataType):
+            exprs.append(F.min(col_expr).alias(f"min__{column}"))
+            exprs.append(F.max(col_expr).alias(f"max__{column}"))
+
+        if is_string_type(field_.dataType):
+            length_expr = F.length(col_expr)
+            exprs.append(F.min(length_expr).alias(f"minlen__{column}"))
+            exprs.append(F.max(length_expr).alias(f"maxlen__{column}"))
+            exprs.append(F.avg(length_expr).alias(f"avglen__{column}"))
+
+    return exprs
 
 
-def compute_sample_values(df: DataFrame, columns: list) -> dict:
-    """Up to SAMPLE_VALUES_PER_COLUMN distinct, non-null example values per column,
-    drawn from one bounded sample of the table rather than a separate scan per column.
-    These are illustrative examples, not the most-frequent values — a true top-N-by-
-    frequency would require a groupBy/count per column, which isn't worth the extra
-    scans for a "give me some example values" use case.
+def profile_table(df: DataFrame, schema_fields: list) -> dict:
+    """Profile every column of a table in exactly one aggregation pass.
+
+    Replaces what was previously three separate full-table operations (row count,
+    null/distinct stats, sample-value scan) with a single Spark job.
     """
-    sample_rows = df.limit(SAMPLE_SCAN_SIZE).collect()
-    sample_values = {column: [] for column in columns}
+    agg_row: Row = df.agg(*build_profiling_expressions(schema_fields)).collect()[0]
+    row_count = agg_row["__row_count__"]
 
-    for row in sample_rows:
-        row_dict = row.asDict()
-        for column in columns:
-            value = row_dict.get(column)
-            if value is None:
-                continue
-            existing = sample_values[column]
-            str_value = str(value)
-            if str_value not in existing and len(existing) < SAMPLE_VALUES_PER_COLUMN:
-                existing.append(str_value)
+    columns_stats = {}
+    for field_ in schema_fields:
+        column = field_.name
+        non_null_count = agg_row[f"nonnull__{column}"]
+        samples = list(agg_row[f"samples__{column}"] or [])
 
-    return sample_values
+        stats = {
+            "distinct_count": agg_row[f"distinct__{column}"],
+            "null_count": row_count - non_null_count,
+            "sample_values": samples[:SAMPLE_VALUES_PER_COLUMN],
+            "min_value": None,
+            "max_value": None,
+            "min_length": None,
+            "max_length": None,
+            "average_length": None,
+        }
+
+        if is_numeric_or_temporal(field_.dataType):
+            stats["min_value"] = _stringify(agg_row[f"min__{column}"])
+            stats["max_value"] = _stringify(agg_row[f"max__{column}"])
+
+        if is_string_type(field_.dataType):
+            stats["min_length"] = agg_row[f"minlen__{column}"]
+            stats["max_length"] = agg_row[f"maxlen__{column}"]
+            avg_length = agg_row[f"avglen__{column}"]
+            stats["average_length"] = round(avg_length, 2) if avg_length is not None else None
+
+        columns_stats[column] = stats
+
+    return {"row_count": row_count, "columns": columns_stats}
+
+
+def _stringify(value) -> Optional[str]:
+    """Render a min/max value (of whatever the column's native type is) as a string,
+    so heterogeneous column types can share one StringType min_value/max_value field.
+    """
+    return None if value is None else str(value)
 
 
 def get_delta_detail(spark: SparkSession, full_table_name: str) -> dict:
@@ -219,9 +290,10 @@ def identify_primary_key_candidates(
     column_base: list, column_stats: dict, row_count: Optional[int]
 ) -> list:
     """A column is a primary key candidate if every value is non-null and distinct
-    across the whole table. Approximate distinct counts make this a heuristic, not a
-    guarantee — good enough to shortlist candidates for human/AI review later, not a
-    substitute for an actual constraint check.
+    across the whole table (both counts are now exact — see profile_table). Uniqueness
+    alone doesn't prove a column is *the* intended key, only that it could be one, so
+    this remains a shortlist for human/AI review, not a substitute for an actual
+    constraint check — but it is no longer subject to approximation error.
     """
     if not row_count:
         return []
@@ -243,12 +315,11 @@ def collect_table_metadata(
     """
     full_table_name = f"{catalog}.{schema}.{table_name}"
     df = spark.table(full_table_name)
-    columns = df.columns
 
-    row_count = df.count()
     column_base = get_column_base_metadata(df)
-    column_stats = compute_column_statistics(df, columns)
-    sample_values = compute_sample_values(df, columns)
+    profile = profile_table(df, df.schema.fields)
+    row_count = profile["row_count"]
+    column_stats = profile["columns"]
     delta_detail = get_delta_detail(spark, full_table_name)
 
     column_records = []
@@ -267,7 +338,12 @@ def collect_table_metadata(
                     "distinct_count": stats.get("distinct_count"),
                     "null_count": null_count,
                     "null_percentage": null_percentage,
-                    "sample_values": sample_values.get(name, []),
+                    "sample_values": stats.get("sample_values", []),
+                    "min_value": stats.get("min_value"),
+                    "max_value": stats.get("max_value"),
+                    "min_length": stats.get("min_length"),
+                    "max_length": stats.get("max_length"),
+                    "average_length": stats.get("average_length"),
                 }
             )
         )
