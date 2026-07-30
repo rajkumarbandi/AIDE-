@@ -1,0 +1,6 @@
+streamlit>=1.38
+pandas>=2.0
+plotly>=5.20
+networkx>=3.2
+databricks-sql-connector>=3.0
+google-genai>=0.6

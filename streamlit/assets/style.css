@@ -1,0 +1,97 @@
+/* AIDE — Azure/Fabric-inspired dark theme.
+   Loaded once per page via components/styles.py::apply_theme(). Plain CSS only,
+   no external fonts/CDNs — everything here must work self-contained. */
+
+:root {
+  --aide-bg: #0e1117;
+  --aide-surface: #161b22;
+  --aide-surface-hover: #1c2330;
+  --aide-border: #2a2f3a;
+  --aide-text: #e6e6e6;
+  --aide-text-muted: #9aa4b2;
+  --aide-accent: #2563eb;
+  --aide-accent-soft: rgba(37, 99, 235, 0.15);
+  --aide-success: #16a34a;
+  --aide-warning: #d97706;
+  --aide-error: #dc2626;
+  --aide-radius: 12px;
+}
+
+/* Light theme overrides are appended as a second :root block by
+   components/styles.py::apply_theme() when the sidebar "Theme" filter is set
+   to Light — CSS cascade order does the override, no JS needed. */
+
+html, body, [class*="css"] {
+  font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+/* Reduce Streamlit's default top padding so the page header sits closer to the top. */
+.block-container {
+  padding-top: 1.5rem;
+}
+
+/* Breadcrumb trail, used by components/header.py */
+.aide-breadcrumb {
+  color: var(--aide-text-muted);
+  font-size: 13px;
+  margin-bottom: 4px;
+}
+
+.aide-page-title {
+  font-size: 28px;
+  font-weight: 700;
+  margin-bottom: 2px;
+}
+
+.aide-page-description {
+  color: var(--aide-text-muted);
+  font-size: 14px;
+  margin-bottom: 18px;
+}
+
+/* Generic card surface, used by metric_cards.py and other components that need
+   a bordered/rounded panel beyond what st.container(border=True) offers. */
+.aide-card {
+  background: var(--aide-surface);
+  border: 1px solid var(--aide-border);
+  border-radius: var(--aide-radius);
+  padding: 16px 20px;
+}
+
+.aide-card:hover {
+  background: var(--aide-surface-hover);
+}
+
+.aide-status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+}
+
+.aide-status-success { background: var(--aide-success); }
+.aide-status-warning { background: var(--aide-warning); }
+.aide-status-error { background: var(--aide-error); }
+.aide-status-neutral { background: var(--aide-text-muted); }
+
+.aide-empty-state {
+  text-align: center;
+  padding: 48px 24px;
+  color: var(--aide-text-muted);
+}
+
+.aide-empty-state .aide-empty-icon {
+  font-size: 40px;
+  margin-bottom: 8px;
+}
+
+/* Sidebar section labels (Connection Status, Warehouse Status, ...) */
+.aide-sidebar-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--aide-text-muted);
+  margin-top: 12px;
+  margin-bottom: 4px;
+}
