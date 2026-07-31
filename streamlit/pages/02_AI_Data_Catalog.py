@@ -189,7 +189,7 @@ def _render_table_detail(table_name: str, layer: str, meta_row: pd.Series) -> No
             col2.metric("Confidence Score", latest.get("confidence_score", "—"))
 
             # Incremental-processing tracking fields — only present once
-            # 02_ai_metadata/03_metadata_analyzer_poc.py has been run against this
+            # 02_ai_metadata/03_metadata_analyzer.py has been run against this
             # warehouse since its incremental-tracking rewrite; absent (None) on
             # data from before that migration, shown as "—" rather than guessed.
             processing_status = latest.get("processing_status")

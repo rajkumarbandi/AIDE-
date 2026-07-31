@@ -75,7 +75,7 @@ def is_configured() -> bool:
 def _strip_code_fence(text: str) -> str:
     """Defensively strip a markdown code fence if the model added one despite
     being told not to — same defensive pattern used by the notebooks' AI
-    Metadata Analyzer (notebooks/02_ai_metadata/03_metadata_analyzer_poc.py).
+    Metadata Analyzer (notebooks/02_ai_metadata/03_metadata_analyzer.py).
     """
     cleaned = text.strip()
     if cleaned.startswith("```"):

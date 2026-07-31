@@ -355,7 +355,7 @@ Same architectural DNA as the existing Bronze/AI notebooks — modular helper fu
 
 | Future item | How this design supports it without rework |
 |---|---|
-| AI Metadata Analysis (extended) | Already built for Bronze (`02_metadata_collector.py`/`03_metadata_analyzer_poc.py`). Pointing it at `aide.silver`/`aide.gold` later is a config/widget change, not a redesign — Silver/Gold schemas are clean and well-documented specifically to make this easy. |
+| AI Metadata Analysis (extended) | Already built for Bronze (`02_metadata_collector.py`/`03_metadata_analyzer.py`). Pointing it at `aide.silver`/`aide.gold` later is a config/widget change, not a redesign — Silver/Gold schemas are clean and well-documented specifically to make this easy. |
 | Business Review Workflow, Approval Workflow, Business Comments, Active/Inactive flags | Modeled as a **separate side table** (e.g. `aide.metadata.business_review`, keyed by object name) referencing Gold objects — never as columns bolted onto the dimensional model. Mirrors the existing `ai_analysis` beside `table_metadata` pattern. |
 | Streamlit Application | Consumes `aide.gold.*` exclusively — the star schema's flat, denormalized attributes mean every stated KPI is a single join, no complex query logic needed in the app layer. |
 | Search / Data Catalog | Extends the already-built `table_metadata`/`ai_analysis` tables to cover Silver/Gold objects — no new infrastructure required. |

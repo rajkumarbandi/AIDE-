@@ -7,7 +7,7 @@
 # MAGIC
 # MAGIC **Scope:** deterministic PySpark/Unity Catalog metadata collection. No LLM calls, no
 # MAGIC AI-generated descriptions, no data quality judgment calls — that's
-# MAGIC `03_metadata_analyzer_poc.py`'s job, once this metadata repository exists for it to
+# MAGIC `03_metadata_analyzer.py`'s job, once this metadata repository exists for it to
 # MAGIC read from. This notebook now covers all three medallion layers (previously Bronze
 # MAGIC only) — every layer gets the same metadata enrichment capability.
 # MAGIC

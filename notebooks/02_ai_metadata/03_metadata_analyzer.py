@@ -78,7 +78,7 @@ import re
 import time
 from typing import Optional
 
-from pyspark.sql import Row, SparkSession
+from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
     IntegerType,
@@ -149,8 +149,6 @@ AI_ANALYSIS_SCHEMA = StructType(
         StructField("analysis_timestamp", TimestampType(), nullable=True),
     ]
 )
-
-_KEY_COLUMNS = ["catalog_name", "schema_name", "table_name"]
 
 _SPARK_TYPE_TO_SQL = {
     "StringType": "STRING",
@@ -255,51 +253,60 @@ def bootstrap_pending_rows(
     """Insert a PENDING row for every (catalog, schema, table) present in
     table_metadata that doesn't already have a row in ai_analysis — the "New Table ->
     PENDING" step of the workflow. Returns how many new rows were added.
+
+    Built as a pure `INSERT INTO ... SELECT` with `CAST(NULL AS ...)` literals
+    rather than `spark.createDataFrame(rows, schema=...)` with Python `None` values —
+    verified directly against a real run: the Spark Connect client's local-to-Arrow
+    conversion path raises `PySparkValueError: input for TimestampType() must not be
+    None` for a Python `None` passed as a TimestampType field, even for a nullable
+    column that's about to be overwritten via `.withColumn(current_timestamp())`
+    immediately after. A plain SQL NULL literal never goes through that conversion
+    path at all, so it isn't subject to this restriction.
     """
     table_metadata_name = f"{metadata_catalog}.metadata.table_metadata"
-    new_tables = spark.sql(
+    new_table_count = spark.sql(
         f"""
-        SELECT m.catalog_name, m.schema_name, m.table_name
+        SELECT COUNT(*) AS n
         FROM {table_metadata_name} m
         LEFT ANTI JOIN {ai_analysis_table} a
           ON m.catalog_name = a.catalog_name
          AND m.schema_name = a.schema_name
          AND m.table_name = a.table_name
         """
-    ).collect()
+    ).collect()[0]["n"]
 
-    if not new_tables:
+    if not new_table_count:
         return 0
 
-    now_rows = [
-        Row(
-            catalog_name=r.catalog_name,
-            schema_name=r.schema_name,
-            table_name=r.table_name,
-            processing_status=PENDING,
-            created_time=None,  # stamped via current_timestamp() below
-            last_processed_time=None,
-            processed_by=None,
-            ai_model_used=None,
-            token_usage=None,
-            retry_count=0,
-            last_error_message=None,
-            analysis_json=None,
-            analysis_markdown=None,
-            health_score=None,
-            confidence_score=None,
-            processing_time_ms=None,
-            analysis_timestamp=None,  # stamped via current_timestamp() below
-        )
-        for r in new_tables
-    ]
-    new_df = (
-        spark.createDataFrame(now_rows, schema=AI_ANALYSIS_SCHEMA)
-        .withColumn("created_time", F.current_timestamp())
-        .withColumn("analysis_timestamp", F.current_timestamp())
+    spark.sql(
+        f"""
+        INSERT INTO {ai_analysis_table}
+        SELECT
+            m.catalog_name,
+            m.schema_name,
+            m.table_name,
+            '{PENDING}' AS processing_status,
+            current_timestamp() AS created_time,
+            CAST(NULL AS TIMESTAMP) AS last_processed_time,
+            CAST(NULL AS STRING) AS processed_by,
+            CAST(NULL AS STRING) AS ai_model_used,
+            CAST(NULL AS BIGINT) AS token_usage,
+            0 AS retry_count,
+            CAST(NULL AS STRING) AS last_error_message,
+            CAST(NULL AS STRING) AS analysis_json,
+            CAST(NULL AS STRING) AS analysis_markdown,
+            CAST(NULL AS INT) AS health_score,
+            CAST(NULL AS INT) AS confidence_score,
+            CAST(NULL AS BIGINT) AS processing_time_ms,
+            current_timestamp() AS analysis_timestamp
+        FROM {table_metadata_name} m
+        LEFT ANTI JOIN {ai_analysis_table} a
+          ON m.catalog_name = a.catalog_name
+         AND m.schema_name = a.schema_name
+         AND m.table_name = a.table_name
+        """
     )
-    new_df.write.format("delta").mode("append").saveAsTable(ai_analysis_table)
-    return len(new_tables)
+    return new_table_count
 
 
 def apply_reprocess_reset(

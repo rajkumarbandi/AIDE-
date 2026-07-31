@@ -40,7 +40,7 @@ _STATUS_BADGE_KIND = {
 }
 _PRIORITY_BADGE_KIND = {"Low": "info", "Medium": "warning", "High": "warning", "Critical": "error"}
 
-# Metadata AI-analysis processing statuses (02_ai_metadata/03_metadata_analyzer_poc.py's
+# Metadata AI-analysis processing statuses (02_ai_metadata/03_metadata_analyzer.py's
 # incremental workflow) — a distinct vocabulary from governance comment statuses above,
 # so it gets its own mapping rather than reusing _STATUS_BADGE_KIND (which has no entry
 # for e.g. "SUCCESS"/"FAILED" and would silently fall back to the wrong color).

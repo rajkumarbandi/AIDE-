@@ -260,7 +260,7 @@ def _render_node_detail(
             else:
                 render_empty_state(
                     f"No AI analysis stored yet for '{node_id}'. Run "
-                    "03_metadata_analyzer_poc.py for this table.",
+                    "03_metadata_analyzer.py for this table.",
                     icon="🤖",
                 )
         else:
