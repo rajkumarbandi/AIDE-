@@ -6,9 +6,65 @@ Uses the .aide-card CSS class from assets/style.css, not a from-scratch style
 block per call.
 """
 
+import html
+
 import streamlit as st
 
 from utils.config import STATUS_COLORS
+
+# Maps a badge "kind" to assets/style.css's .aide-badge-* class — the app-wide
+# color convention: blue=info, green=success, amber=warning, red=error,
+# purple=AI, plus bronze/silver/gold for medallion layer.
+_BADGE_CLASSES = {
+    "info": "aide-badge-info",
+    "success": "aide-badge-success",
+    "warning": "aide-badge-warning",
+    "error": "aide-badge-error",
+    "ai": "aide-badge-ai",
+    "bronze": "aide-badge-bronze",
+    "silver": "aide-badge-silver",
+    "gold": "aide-badge-gold",
+}
+
+# Governance status/priority values map to a badge kind by real business
+# meaning (e.g. "Rejected"/"Critical" read as errors, "Resolved"/"Implemented"
+# as success), not just alphabetically.
+_STATUS_BADGE_KIND = {
+    "New": "info",
+    "Flagged": "warning",
+    "Under Review": "info",
+    "Approved": "success",
+    "Rejected": "error",
+    "Resolved": "success",
+    "Implemented": "success",
+}
+_PRIORITY_BADGE_KIND = {"Low": "info", "Medium": "warning", "High": "warning", "Critical": "error"}
+
+
+def render_badge(label: str, kind: str = "info") -> str:
+    """Return (not render directly) an inline HTML badge — meant to be
+    embedded inside a larger st.markdown(..., unsafe_allow_html=True) call
+    alongside other content, e.g. f"{render_badge(status, 'success')} · {author}".
+    """
+    css_class = _BADGE_CLASSES.get(kind, _BADGE_CLASSES["info"])
+    return f'<span class="aide-badge {css_class}">{html.escape(label)}</span>'
+
+
+def status_badge(status: str) -> str:
+    """A governance comment status, badge-colored by real workflow meaning."""
+    return render_badge(status, _STATUS_BADGE_KIND.get(status, "info"))
+
+
+def priority_badge(priority: str) -> str:
+    """A governance comment priority, badge-colored by real urgency."""
+    return render_badge(priority, _PRIORITY_BADGE_KIND.get(priority, "info"))
+
+
+def layer_badge(layer: str) -> str:
+    """A medallion layer (bronze/silver/gold), badge-colored to match the
+    same convention used by the AI Data Model Explorer's ER diagram.
+    """
+    return render_badge(layer.title(), layer.lower() if layer.lower() in ("bronze", "silver", "gold") else "info")
 
 
 def render_metric_card(label: str, value: str, status: str = None, caption: str = None) -> None:

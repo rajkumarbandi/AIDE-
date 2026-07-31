@@ -61,6 +61,10 @@ else:
 
     table_names = sorted(tables_df["table_name"].dropna().unique().tolist())
     selected_table = st.selectbox("Select a table", table_names)
+    st.caption(
+        "Looking for this table's business description, AI analysis, or relationships "
+        "instead? See 📚 AI Data Catalog."
+    )
 
     preview_tab, profile_tab = st.tabs(["📄 Data Preview", "📊 Column Profiling"])
 
@@ -119,8 +123,14 @@ else:
                     nulls = profile_row.get(f"{name}__nulls")
                     distinct = profile_row.get(f"{name}__distinct")
                     null_pct = (nulls / total_rows) if (total_rows and nulls is not None) else None
+                    # approx_count_distinct is a HyperLogLog estimate, not an exact count — on
+                    # small tables or high-cardinality columns it can legitimately estimate
+                    # slightly ABOVE the true distinct count (and therefore above total_rows).
+                    # A "% of rows that are distinct" can never exceed 100% by definition, so
+                    # the estimate is capped for display; the underlying estimate itself is
+                    # correct and unmodified.
                     distinct_pct = (
-                        (distinct / total_rows) if (total_rows and distinct is not None) else None
+                        min(distinct / total_rows, 1.0) if (total_rows and distinct is not None) else None
                     )
                     summary_rows.append(
                         {

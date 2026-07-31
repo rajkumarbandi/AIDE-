@@ -1,16 +1,18 @@
-"""AI Data Model Explorer graph engine.
+"""AI Data Model Explorer's ER diagram engine.
 
-Library choice (researched, not assumed): NetworkX for layout only, Plotly for
-rendering, via st.plotly_chart(..., on_select="rerun") — Streamlit's native
-selection-event API. Two alternatives were considered and rejected:
-- yFiles Graphs for Streamlit is the most polished option, but it's a
-  commercial product; a licensing dependency isn't appropriate to bake into
-  a portfolio project's foundation without an explicit decision to pay for it.
-- streamlit-agraph is the most common dedicated graph component, but has
-  documented compatibility issues following its 2.0 update (per Streamlit's
-  own community discussion, mid-2026).
-Plotly is Streamlit-native, actively maintained, and gives real pan/zoom/hover
-for free — no extra component dependency, no version-compatibility risk.
+Renders entity-relationship boxes (table name + PK/FK, per real database-
+documentation conventions) instead of plain circular nodes — via Plotly
+shapes (the boxes) + annotations (the text) + an invisible marker trace per
+box for click/hover, layered on NetworkX only for the left-to-right
+Bronze/Silver/Gold positioning. Same library choice as before (see git
+history): Plotly is Streamlit-native and gives real pan/zoom for free, so
+switching to a box-based look needed no new dependency.
+
+Connectors are straight lines between box edges (not full orthogonal
+right-angle routing like diagrams.net/Lucidchart) — box-edge-to-box-edge
+straight connectors are a real, common ER-diagram style, achievable within
+Plotly's shape system without a new charting dependency; true orthogonal
+edge routing would need one.
 """
 
 import logging
@@ -26,13 +28,19 @@ logger = logging.getLogger("aide.graph")
 
 # Left-to-right column per layer, so the layout visually reads as
 # Bronze -> Silver -> Gold rather than a generic force-directed blob.
-_LAYER_X = {"bronze": 0, "silver": 1, "metadata": 1, "gold": 2}
+# Widened from the original 0/1/2 spacing to leave clear room for boxes.
+_LAYER_X = {"bronze": 0, "silver": 2.6, "metadata": 2.6, "gold": 5.2}
+_ROW_SPACING = 1.3
+_BOX_WIDTH = 1.9
+_BOX_HEIGHT = 0.85
 _HIGHLIGHT_COLOR = "#2563eb"
 _MUTED_EDGE_COLOR = "#4b5563"
+_MAX_KEY_LINE_ITEMS = 3
 
 
 def build_graph(nodes: list, edges: list) -> nx.DiGraph:
-    """nodes: [{"id", "label", "layer", "kind"}, ...]
+    """nodes: [{"id", "label", "layer", "kind", "pk": [...], "fk": [...]}, ...]
+    ("pk"/"fk" are optional — an empty/missing list just shows no key line.)
     edges: [{"source", "target", "label"}, ...]
     """
     graph = nx.DiGraph()
@@ -44,7 +52,7 @@ def build_graph(nodes: list, edges: list) -> nx.DiGraph:
 
 
 def _layered_positions(graph: nx.DiGraph) -> dict:
-    """Deterministic left-to-right-by-layer, stacked-within-layer positions."""
+    """Deterministic left-to-right-by-layer, stacked-within-layer box-center positions."""
     layer_buckets = {}
     for node_id, data in graph.nodes(data=True):
         layer_buckets.setdefault(data.get("layer", "bronze"), []).append(node_id)
@@ -53,7 +61,7 @@ def _layered_positions(graph: nx.DiGraph) -> dict:
     for layer, node_ids in layer_buckets.items():
         x = _LAYER_X.get(layer, 0)
         for i, node_id in enumerate(sorted(node_ids)):
-            positions[node_id] = (x, -i)
+            positions[node_id] = (x, -i * _ROW_SPACING)
     return positions
 
 
@@ -79,30 +87,59 @@ def render_legend() -> None:
     st.markdown(f'<div style="margin-bottom:8px;">{items}</div>', unsafe_allow_html=True)
 
 
+def _key_line(items: list, icon: str) -> str:
+    if not items:
+        return ""
+    shown = items[:_MAX_KEY_LINE_ITEMS]
+    suffix = f" +{len(items) - _MAX_KEY_LINE_ITEMS} more" if len(items) > _MAX_KEY_LINE_ITEMS else ""
+    return f"{icon} {', '.join(shown)}{suffix}"
+
+
+def _box_edge_anchor(x0: float, y0: float, x1: float, y1: float) -> tuple:
+    """Where a straight connector should touch each box's border, not its
+    center — comparing horizontal vs. vertical separation to decide whether
+    to anchor at the left/right edges (cross-layer edges) or top/bottom
+    edges (same-layer, vertically-stacked edges like fact_sales' FKs to its
+    Gold-layer dimensions).
+    """
+    dx, dy = x1 - x0, y1 - y0
+    if abs(dx) >= abs(dy):
+        start = (x0 + _BOX_WIDTH / 2 if dx > 0 else x0 - _BOX_WIDTH / 2, y0)
+        end = (x1 - _BOX_WIDTH / 2 if dx > 0 else x1 + _BOX_WIDTH / 2, y1)
+    else:
+        start = (x0, y0 + _BOX_HEIGHT / 2 if dy > 0 else y0 - _BOX_HEIGHT / 2)
+        end = (x1, y1 - _BOX_HEIGHT / 2 if dy > 0 else y1 + _BOX_HEIGHT / 2)
+    return start, end
+
+
 def render_graph(
     graph: nx.DiGraph, key: str = "aide_warehouse_graph", highlight_node: Optional[str] = None
 ) -> Optional[dict]:
-    """Render the graph. Returns {"type": "node", "id": ...} or
+    """Render the ER diagram. Returns {"type": "node", "id": ...} or
     {"type": "edge", "source": ..., "target": ...} for whatever was clicked,
     or None if nothing is selected this run.
 
-    If `highlight_node` is set, edges touching that node are drawn in the
-    accent color and thicker; all other edges stay muted — the
-    "relationship highlighting" behavior.
+    If `highlight_node` is set, edges touching that node (and that node's own
+    box border) are drawn in the accent color and thicker; everything else
+    stays muted — the "click table to highlight relationships" behavior.
     """
     positions = _layered_positions(graph)
     node_ids = list(graph.nodes())
 
+    shapes = []
+    annotations = []
     edge_traces = []
     edge_midpoint_x, edge_midpoint_y, edge_midpoint_ids = [], [], []
+
     for source, target in graph.edges():
         x0, y0 = positions[source]
         x1, y1 = positions[target]
         is_highlighted = highlight_node is not None and highlight_node in (source, target)
+        start, end = _box_edge_anchor(x0, y0, x1, y1)
         edge_traces.append(
             go.Scatter(
-                x=[x0, x1],
-                y=[y0, y1],
+                x=[start[0], end[0]],
+                y=[start[1], end[1]],
                 mode="lines",
                 line=dict(
                     width=3 if is_highlighted else 1.5,
@@ -112,56 +149,95 @@ def render_graph(
                 showlegend=False,
             )
         )
-        edge_midpoint_x.append((x0 + x1) / 2)
-        edge_midpoint_y.append((y0 + y1) / 2)
+        edge_midpoint_x.append((start[0] + end[0]) / 2)
+        edge_midpoint_y.append((start[1] + end[1]) / 2)
         edge_midpoint_ids.append(f"{source}::{target}")
 
     edge_click_trace = go.Scatter(
         x=edge_midpoint_x,
         y=edge_midpoint_y,
         mode="markers",
-        marker=dict(size=10, color="rgba(0,0,0,0)"),
+        marker=dict(size=12, color="rgba(0,0,0,0)"),
         customdata=edge_midpoint_ids,
         hoverinfo="skip",
         showlegend=False,
         name="edges",
     )
 
-    node_x = [positions[n][0] for n in node_ids]
-    node_y = [positions[n][1] for n in node_ids]
-    node_trace = go.Scatter(
-        x=node_x,
-        y=node_y,
-        mode="markers+text",
-        text=[graph.nodes[n].get("label", n) for n in node_ids],
-        textposition="top center",
-        textfont=dict(color="#e6e6e6", size=11),
-        marker=dict(
-            size=[28 if n == highlight_node else 22 for n in node_ids],
-            color=[_node_color(graph.nodes[n]) for n in node_ids],
-            line=dict(
-                width=[3 if n == highlight_node else 1 for n in node_ids],
-                color="#0e1117",
-            ),
-        ),
+    node_hover_x, node_hover_y, node_hovertext = [], [], []
+    for node_id in node_ids:
+        data = graph.nodes[node_id]
+        x, y = positions[node_id]
+        is_highlighted = node_id == highlight_node
+        color = _node_color(data)
+        border_color = _HIGHLIGHT_COLOR if is_highlighted else "#0e1117"
+        border_width = 3 if is_highlighted else 1.5
+
+        shapes.append(
+            dict(
+                type="rect",
+                x0=x - _BOX_WIDTH / 2,
+                x1=x + _BOX_WIDTH / 2,
+                y0=y - _BOX_HEIGHT / 2,
+                y1=y + _BOX_HEIGHT / 2,
+                line=dict(color=border_color, width=border_width),
+                fillcolor=color,
+                opacity=0.85 if is_highlighted else 0.55,
+                layer="below",
+            )
+        )
+
+        pk_line = _key_line(data.get("pk") or [], "🔑")
+        fk_line = _key_line(data.get("fk") or [], "🔗")
+        body_lines = [f"<b>{data.get('label', node_id)}</b>"]
+        if pk_line:
+            body_lines.append(pk_line)
+        if fk_line:
+            body_lines.append(fk_line)
+
+        annotations.append(
+            dict(
+                x=x,
+                y=y,
+                text="<br>".join(body_lines),
+                showarrow=False,
+                font=dict(color="#f5f5f5", size=11),
+                align="center",
+            )
+        )
+
+        node_hover_x.append(x)
+        node_hover_y.append(y)
+        all_pk = ", ".join(data.get("pk") or []) or "—"
+        all_fk = ", ".join(data.get("fk") or []) or "—"
+        node_hovertext.append(
+            f"<b>{data.get('label', node_id)}</b><br>Layer: {data.get('layer', '—')}<br>"
+            f"Kind: {data.get('kind', '—')}<br>Primary Key(s): {all_pk}<br>Foreign Key(s): {all_fk}"
+        )
+
+    node_click_trace = go.Scatter(
+        x=node_hover_x,
+        y=node_hover_y,
+        mode="markers",
+        marker=dict(size=[_BOX_WIDTH * 32] * len(node_ids), color="rgba(0,0,0,0)"),
         customdata=node_ids,
-        hovertext=[
-            f"{graph.nodes[n].get('label', n)} ({graph.nodes[n].get('layer', '')})"
-            for n in node_ids
-        ],
+        hovertext=node_hovertext,
         hoverinfo="text",
+        showlegend=False,
         name="nodes",
     )
 
-    fig = go.Figure(data=edge_traces + [edge_click_trace, node_trace])
+    fig = go.Figure(data=edge_traces + [edge_click_trace, node_click_trace])
     fig.update_layout(
+        shapes=shapes,
+        annotations=annotations,
         showlegend=False,
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
-        xaxis=dict(visible=False),
-        yaxis=dict(visible=False),
+        xaxis=dict(visible=False, fixedrange=False),
+        yaxis=dict(visible=False, fixedrange=False, scaleanchor="x"),
         margin=dict(l=10, r=10, t=10, b=10),
-        height=520,
+        height=600,
         dragmode="pan",
     )
 
@@ -198,7 +274,7 @@ def _resolve_selection(event, node_ids: list, edge_trace_count: int) -> Optional
     point_index = point.get("point_index", point.get("pointIndex", point.get("point_number")))
     if point_index is None:
         return None
-    if curve_number == edge_trace_count + 1:  # node_trace is the last one added
+    if curve_number == edge_trace_count + 1:  # node_click_trace is the last one added
         if 0 <= point_index < len(node_ids):
             return {"type": "node", "id": node_ids[point_index]}
     return None

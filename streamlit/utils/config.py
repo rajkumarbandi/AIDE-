@@ -27,6 +27,7 @@ NAV_PAGES = [
     {"path": "pages/05_AI_Assistant.py", "title": "AI Assistant", "icon": "🤖"},
     {"path": "pages/06_SQL_Playground.py", "title": "SQL Playground", "icon": "💻"},
     {"path": "pages/07_Settings.py", "title": "Settings", "icon": "⚙"},
+    {"path": "pages/08_Data_Governance.py", "title": "Data Governance", "icon": "🛡"},
 ]
 
 # Layer/kind colors — used consistently by the AI Data Model Explorer graph AND

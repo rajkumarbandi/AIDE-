@@ -40,6 +40,7 @@ from utils.queries import (
     KNOWN_GOLD_TABLES,
     KNOWN_SILVER_TABLES,
     SILVER_LINEAGE,
+    gold_keys_for_table,
     sql_ai_analysis,
     sql_information_schema_columns,
     sql_preview_table,
@@ -82,6 +83,12 @@ def _load_bronze_metadata(catalog: str) -> Optional[pd.DataFrame]:
 def _build_nodes(metadata_df: Optional[pd.DataFrame]) -> list:
     """Bronze nodes come from live metadata when available; Silver/Gold nodes
     are always added from the known table lists (see module docstring).
+
+    "pk"/"fk" are populated for the ER diagram's key display: Bronze uses
+    the AI-collected primary_key_candidates; Gold uses gold_keys_for_table()
+    (the real GOLD_RELATIONSHIPS registry). Silver has no live FK metadata
+    to read here (Unity Catalog declares none), so it shows no key line —
+    an honest gap, not a fabricated one.
     """
     nodes = {}
     if metadata_df is not None and not metadata_df.empty:
@@ -92,14 +99,25 @@ def _build_nodes(metadata_df: Optional[pd.DataFrame]) -> list:
                 "label": table_name,
                 "layer": row.get("schema_name", "bronze"),
                 "kind": "table",
+                "pk": to_plain_list(row.get("primary_key_candidates")),
+                "fk": [],
             }
     for table_name in KNOWN_SILVER_TABLES:
         nodes.setdefault(
-            table_name, {"id": table_name, "label": table_name, "layer": "silver", "kind": "table"}
+            table_name,
+            {"id": table_name, "label": table_name, "layer": "silver", "kind": "table", "pk": [], "fk": []},
         )
     for table_name in KNOWN_GOLD_TABLES:
         kind = "fact" if table_name.startswith("fact_") else "dimension"
-        nodes[table_name] = {"id": table_name, "label": table_name, "layer": "gold", "kind": kind}
+        primary_keys, foreign_keys = gold_keys_for_table(table_name)
+        nodes[table_name] = {
+            "id": table_name,
+            "label": table_name,
+            "layer": "gold",
+            "kind": kind,
+            "pk": primary_keys,
+            "fk": foreign_keys,
+        }
     return list(nodes.values())
 
 
@@ -323,19 +341,55 @@ def _render_edge_detail(rel_source: str, rel_target: str, graph: nx.DiGraph) -> 
     if matching:
         rel = matching[0]
         description = rel["description"]
-        st.markdown(description)
+        join_condition = f"{rel['from_table']}.{rel['from_column']} = {rel['to_table']}.{rel['to_column']}"
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown(f"**Parent Table:** `{rel['to_table']}`")
+            st.markdown("**Join Type:** LEFT JOIN")
+            st.markdown(f"**Referenced Key:** `{rel['to_column']}`")
+        with col2:
+            st.markdown(f"**Child Table:** `{rel['from_table']}`")
+            st.markdown(
+                f"**Cardinality:** Many-to-One (many `{rel['from_table']}` rows per "
+                f"`{rel['to_table']}` row)"
+            )
+        st.markdown(f"**Business Meaning:** {description}")
+
+        st.markdown("**Join Condition** _(click to copy)_")
+        st.code(join_condition, language="sql")
+
+        st.markdown("**Generated Join SQL** _(click to copy)_")
         st.code(
-            f"SELECT *\nFROM {rel['from_table']} f\nJOIN {rel['to_table']} d\n"
+            f"SELECT *\nFROM {rel['from_table']} f\nLEFT JOIN {rel['to_table']} d\n"
             f"  ON f.{rel['from_column']} = d.{rel['to_column']}",
             language="sql",
         )
+
+        col_a, col_b, col_c = st.columns(3)
+        with col_a:
+            if st.button(f"📄 View {rel['to_table']}", key=f"view_parent_{rel_source}_{rel_target}"):
+                st.session_state["aide_selected_node"] = rel["to_table"]
+                st.session_state.pop("aide_selected_edge", None)
+                st.rerun()
+        with col_b:
+            if st.button(f"📄 View {rel['from_table']}", key=f"view_child_{rel_source}_{rel_target}"):
+                st.session_state["aide_selected_node"] = rel["from_table"]
+                st.session_state.pop("aide_selected_edge", None)
+                st.rerun()
+        with col_c:
+            if st.button("🔍 Highlight in Diagram", key=f"highlight_{rel_source}_{rel_target}"):
+                st.session_state["aide_selected_node"] = rel["from_table"]
+                st.session_state.pop("aide_selected_edge", None)
+                st.rerun()
     else:
         description = (
             f"'{rel_source}' feeds '{rel_target}' as part of the medallion build — the "
             "source table's transformation output becomes this target table."
         )
         st.markdown("This is a Bronze → Silver or Silver → Gold lineage edge — the source "
-                    "table feeds the target table's transformation.")
+                    "table feeds the target table's transformation. It has no join key of its "
+                    "own (it isn't a foreign-key relationship, it's an ETL build step).")
 
     if st.button("🤖 Explain this relationship in plain English", key=f"explain_rel_{rel_source}_{rel_target}"):
         with st.spinner("Asking Gemini..."):

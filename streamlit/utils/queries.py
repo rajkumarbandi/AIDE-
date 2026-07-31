@@ -91,6 +91,25 @@ def sql_schema_columns(catalog: str, schema: str) -> str:
     )
 
 
+def sql_schema_table_column_counts(catalog: str, schema: str) -> str:
+    """Column count per table in one schema, in ONE query — used to enrich
+    the Silver/Gold catalog listing without a per-table round trip.
+    """
+    return (
+        "SELECT table_name, COUNT(*) AS column_count "
+        f"FROM {catalog}.information_schema.columns WHERE table_schema = '{schema}' "
+        "GROUP BY table_name"
+    )
+
+
+def sql_row_count(catalog: str, schema: str, table_name: str) -> str:
+    """Exact row count for one table — deliberately on-demand (called only
+    for the currently-selected table in a detail view), never eagerly for
+    every row of a catalog listing.
+    """
+    return f"SELECT COUNT(*) AS row_count FROM {catalog}.{schema}.{table_name}"
+
+
 def sql_column_sample_values(catalog: str, schema: str, table_name: str, column: str, limit: int = 10) -> str:
     """Distinct, non-null sample values for one column — the Warehouse
     Explorer's column-profiling "sample values" view.
@@ -322,6 +341,22 @@ GOLD_RELATIONSHIPS = [
         "description": "Each sale occurred on one calendar date.",
     },
 ]
+
+def gold_keys_for_table(table_name: str) -> tuple:
+    """Real PK/FK info for a Gold table, derived from GOLD_RELATIONSHIPS — the
+    only layer with an explicit, verified key registry (Unity Catalog has no
+    *enforced* FK constraints here to read live; see GOLD_RELATIONSHIPS'
+    docstring above). Returns (primary_keys: list, foreign_keys: list of
+    "column → table.column" strings).
+    """
+    primary_keys, foreign_keys = set(), []
+    for rel in GOLD_RELATIONSHIPS:
+        if rel["to_table"] == table_name:
+            primary_keys.add(rel["to_column"])
+        if rel["from_table"] == table_name:
+            foreign_keys.append(f"{rel['from_column']} → {rel['to_table']}.{rel['to_column']}")
+    return sorted(primary_keys), foreign_keys
+
 
 # Known Silver/Gold table names, from having built 02_silver/*.py and
 # 03_gold/*.py directly — real, not invented, but not yet AI-analyzed, since

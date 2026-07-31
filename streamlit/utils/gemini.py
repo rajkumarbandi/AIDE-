@@ -104,22 +104,90 @@ def generate_executive_summary(kpi_context: str) -> str:
     return generate_content(prompt)
 
 
-def generate_sql_from_question(question: str, schema_context: str) -> str:
-    """A single read-only SELECT statement answering `question`.
+NO_SQL_NEEDED = "NO_SQL_NEEDED"
 
-    Grounded in `schema_context` (the real table/column list — see
-    utils.queries) so the model can't invent a table or column that doesn't
-    exist in this warehouse.
+
+def generate_sql_from_question(question: str, schema_context: str) -> str:
+    """A single read-only SELECT statement answering `question` — or the
+    literal string NO_SQL_NEEDED if the question isn't about this
+    warehouse's data (e.g. a general/conceptual question), so the AI
+    Assistant's agent loop can route it to answer_general_question() instead
+    of wasting an execution attempt on a query that was never the point.
+
+    Grounded in `schema_context` (the real table/column list, relationships,
+    and business descriptions — see utils.agent) so the model can't invent a
+    table or column that doesn't exist in this warehouse.
     """
     prompt = (
         "You are a SQL assistant for a Databricks SQL warehouse (Delta Lake, "
-        "Unity Catalog, ANSI SQL). Using ONLY the tables and columns listed "
-        "below — never invent a table or column name that isn't listed — "
-        "write a single read-only SELECT statement that answers the question. "
-        "Return ONLY the SQL statement: no markdown fences, no commentary.\n\n"
+        "Unity Catalog, ANSI SQL). If the question below is a general/conceptual "
+        "question NOT asking about this warehouse's actual data (e.g. asking what a "
+        "medallion architecture is, or how this app works), respond with EXACTLY "
+        f"the text {NO_SQL_NEEDED} and nothing else.\n\n"
+        "Otherwise, using ONLY the tables and columns listed below — never invent a "
+        "table or column name that isn't listed — write a single read-only SELECT "
+        "statement that answers the question, using the listed relationships for "
+        "join keys. Return ONLY the SQL statement: no markdown fences, no commentary.\n\n"
         f"Schema:\n{schema_context}\n\nQuestion: {question}"
     )
     return _strip_code_fence(generate_content(prompt))
+
+
+def fix_sql_from_error(question: str, schema_context: str, failed_sql: str, error_message: str) -> str:
+    """A corrected SELECT statement after `failed_sql` errored against the
+    warehouse — the AI Assistant's one automatic retry, grounded in the same
+    real schema context plus the actual error text, so the retry has a
+    concrete reason to differ rather than repeating the same mistake.
+    """
+    prompt = (
+        "The following SQL query failed against a Databricks SQL warehouse. Using "
+        "ONLY the tables and columns listed below, fix the query so it correctly "
+        "answers the original question. Return ONLY the corrected SQL statement: no "
+        "markdown fences, no commentary.\n\n"
+        f"Schema:\n{schema_context}\n\nOriginal question: {question}\n\n"
+        f"Failed SQL:\n{failed_sql}\n\nError:\n{error_message}"
+    )
+    return _strip_code_fence(generate_content(prompt))
+
+
+def answer_general_question(question: str) -> str:
+    """A direct, general-knowledge answer for a question that isn't about
+    this warehouse's actual data (routed here via generate_sql_from_question
+    returning NO_SQL_NEEDED) — e.g. "what is a medallion architecture?".
+    """
+    prompt = (
+        "You are AIDE's AI Data Analyst, embedded in an enterprise data engineering "
+        "platform built on Databricks, Delta Lake, and a medallion (Bronze/Silver/"
+        "Gold) architecture over the AdventureWorks dataset. The user asked a general "
+        "question, not one about this warehouse's live data. Answer concisely and "
+        "helpfully, ChatGPT-style — no long essays.\n\nQuestion: " + question
+    )
+    return generate_content(prompt)
+
+
+def summarize_query_result(question: str, sql: str, result_preview: str, row_count: int) -> str:
+    """Turn real, already-executed query results into a concise, business-
+    friendly answer — never asked to invent figures, only to narrate the
+    real rows given to it.
+    """
+    prompt = (
+        "You are AIDE's AI Data Analyst. A user asked a business question about a "
+        "Databricks sales data warehouse; you already ran a SQL query and have REAL "
+        "results below — use ONLY these figures, never invent a number not present "
+        "here. Answer like a professional analyst message (ChatGPT-style): concise, "
+        "business-friendly, and never mention SQL or that a query was run. Use this "
+        "structure, omitting any section that doesn't apply, and keep it tight (no "
+        "long essays):\n\n"
+        "**Summary** — one or two sentences directly answering the question.\n"
+        "**Key Findings** — the most important numbers; use a short markdown table if "
+        "there are multiple rows.\n"
+        "**Insights** — a sentence of context, only if it adds real value.\n"
+        "**Recommendations** — only if genuinely relevant to a business question like this.\n\n"
+        f"Question: {question}\n\nSQL that was run (context only — never mention or repeat "
+        f"this in your answer):\n{sql}\n\nResult ({row_count} row(s) total, showing up to 30):\n"
+        f"{result_preview}"
+    )
+    return generate_content(prompt)
 
 
 def explain_sql(sql: str) -> str:
