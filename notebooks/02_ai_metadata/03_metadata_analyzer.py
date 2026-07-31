@@ -262,6 +262,16 @@ def bootstrap_pending_rows(
     column that's about to be overwritten via `.withColumn(current_timestamp())`
     immediately after. A plain SQL NULL literal never goes through that conversion
     path at all, so it isn't subject to this restriction.
+
+    Uses an EXPLICIT column list (AI_ANALYSIS_SCHEMA's field names), not positional
+    `INSERT INTO t SELECT ...` — also verified directly against a real run: a table
+    that already existed before this rewrite keeps its old columns too (model_name,
+    status, error_message — ensure_ai_analysis_table() only ever ADDS columns, never
+    drops any), so the real table can easily have more physical columns than this
+    schema's 17 fields. Delta's positional INSERT requires exact arity against the
+    real table and fails with DELTA_INSERT_COLUMN_ARITY_MISMATCH otherwise; a named
+    column list inserts NULL into every column not listed instead, which is exactly
+    the desired behavior for those legacy-only columns.
     """
     table_metadata_name = f"{metadata_catalog}.metadata.table_metadata"
     new_table_count = spark.sql(
@@ -278,9 +288,10 @@ def bootstrap_pending_rows(
     if not new_table_count:
         return 0
 
+    column_list = ", ".join(AI_ANALYSIS_SCHEMA.fieldNames())
     spark.sql(
         f"""
-        INSERT INTO {ai_analysis_table}
+        INSERT INTO {ai_analysis_table} ({column_list})
         SELECT
             m.catalog_name,
             m.schema_name,
