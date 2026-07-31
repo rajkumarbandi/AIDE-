@@ -5,11 +5,16 @@ completely hidden from the user unless they open the debug view.
 
 This is the one place in the app that both writes AND executes AI-generated
 SQL with no human review step in between (by explicit design — no "Generate
-SQL" button, no "Run Query" button, no editor). The safety net that makes
-that acceptable is unchanged from SQL Playground: validate_select_only()
-still runs on every attempt, so a wrong-but-still-SELECT query can produce a
-wrong (but honestly-labeled, retryable) answer — it can never be a
-DROP/DELETE/UPDATE/etc.
+SQL" button, no "Run Query" button, no editor). Two safety nets make that
+acceptable, both running on every attempt, hidden from the user:
+validate_select_only() (unchanged from SQL Playground — a wrong-but-still-
+SELECT query can produce a wrong, retryable answer, but never a
+DROP/DELETE/UPDATE/etc.) and validate_catalog_only() (added after a real
+production bug: Gemini invented a plausible-looking but wrong catalog name
+when its prompt context didn't spell the configured catalog out explicitly
+enough — this backstop rejects any generated SQL that references a
+different or missing catalog, forcing a retry, instead of letting it reach
+the warehouse and fail there).
 """
 
 import logging
@@ -25,6 +30,7 @@ from utils.databricks import (
     DatabricksQueryError,
     UnsafeQueryError,
     run_query,
+    validate_catalog_only,
     validate_select_only,
 )
 from utils.gemini import (
@@ -110,8 +116,11 @@ def build_warehouse_context(catalog: str = DEFAULT_CATALOG, gold_schema: str = D
     try:
         columns_df = run_query(sql_schema_columns(catalog, gold_schema))
         if not columns_df.empty:
+            # Every reference is fully qualified with the real, configured catalog — omitting
+            # it here previously left Gemini with no grounding for which catalog to use, and
+            # it would invent a plausible-looking one (a real, observed production bug).
             lines = [
-                f"{gold_schema}.{row['table_name']}.{row['column_name']} ({row['data_type']})"
+                f"{catalog}.{gold_schema}.{row['table_name']}.{row['column_name']} ({row['data_type']})"
                 for _, row in columns_df.iterrows()
             ]
             sections.append("TABLES AND COLUMNS:\n" + "\n".join(lines))
@@ -119,13 +128,14 @@ def build_warehouse_context(catalog: str = DEFAULT_CATALOG, gold_schema: str = D
         logger.warning("Could not load schema columns for agent context: %s", exc)
 
     relationship_lines = [
-        f"{rel['from_table']}.{rel['from_column']} = {rel['to_table']}.{rel['to_column']} "
-        f"({rel['description']})"
+        f"{catalog}.{gold_schema}.{rel['from_table']}.{rel['from_column']} = "
+        f"{catalog}.{gold_schema}.{rel['to_table']}.{rel['to_column']} ({rel['description']})"
         for rel in GOLD_RELATIONSHIPS
     ]
     if relationship_lines:
         sections.append(
-            "KNOWN RELATIONSHIPS (use these exact join keys):\n" + "\n".join(relationship_lines)
+            "KNOWN RELATIONSHIPS (use these exact join keys, fully qualified):\n"
+            + "\n".join(relationship_lines)
         )
 
     try:
@@ -184,9 +194,9 @@ def answer_question(
     for attempt_num in range(_MAX_SQL_ATTEMPTS):
         try:
             if attempt_num == 0:
-                sql = generate_sql_from_question(question, context)
+                sql = generate_sql_from_question(question, context, catalog)
             else:
-                sql = fix_sql_from_error(question, context, sql, last_error)
+                sql = fix_sql_from_error(question, context, sql, last_error, catalog)
         except GeminiConfigurationError as exc:
             result.answer = "The AI service isn't configured yet — see ⚙ Settings."
             result.error = str(exc)
@@ -209,6 +219,7 @@ def answer_question(
 
         try:
             validate_select_only(sql)
+            validate_catalog_only(sql, catalog)
             result_df = run_query(sql)
             result.sql = sql
             result.result_df = result_df
@@ -217,7 +228,7 @@ def answer_question(
         except UnsafeQueryError as exc:
             last_error = str(exc)
             result.attempts.append(AgentAttempt(sql=sql, error=last_error))
-            logger.warning("Agent-generated SQL rejected by validate_select_only: %s", exc)
+            logger.warning("Agent-generated SQL rejected: %s", exc)
         except DatabricksConnectionError as exc:
             result.answer = (
                 "I can't reach the Databricks warehouse right now — please check the "

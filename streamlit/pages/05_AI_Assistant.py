@@ -13,11 +13,11 @@ for anyone who wants to verify what actually ran; it is never shown by default.
 import streamlit as st
 
 from components.chat import render_chat_history, render_chat_input
-from components.filters import get_filters
 from components.header import render_page_header
 from components.shell import render_app_shell
 from components.tables import render_dataframe
 from utils.agent import answer_question
+from utils.app_config import get_app_config
 
 render_app_shell()
 
@@ -31,12 +31,12 @@ render_page_header(
 _HISTORY_KEY = "aide_assistant_history"
 _DEBUG_KEY = "aide_assistant_last_debug"
 
-filters = get_filters()
+app_config = get_app_config()
 
 
 def _handle_question(question: str) -> str:
     with st.spinner("Analyzing your question..."):
-        result = answer_question(question, catalog=filters["catalog"], gold_schema=filters["schema"])
+        result = answer_question(question, catalog=app_config.catalog, gold_schema=app_config.schema)
     st.session_state[_DEBUG_KEY] = result
     return result.answer
 

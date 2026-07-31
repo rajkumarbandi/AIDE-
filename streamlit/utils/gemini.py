@@ -107,7 +107,24 @@ def generate_executive_summary(kpi_context: str) -> str:
 NO_SQL_NEEDED = "NO_SQL_NEEDED"
 
 
-def generate_sql_from_question(question: str, schema_context: str) -> str:
+def _catalog_mandate(catalog: str) -> str:
+    """Shared, unmissable instruction block: exactly one catalog is ever
+    valid, and it's passed explicitly here — not left for the model to infer
+    from the schema listing alone. A real production bug (Gemini inventing a
+    plausible-looking but wrong catalog name, e.g. "rg_dev_sandbox") happened
+    specifically because the catalog previously only appeared buried inside
+    the schema text; this repeats it as its own explicit, emphatic rule.
+    """
+    return (
+        f"The ONLY valid catalog is exactly \"{catalog}\". Every single table reference in "
+        f"your SQL — every FROM and every JOIN — MUST be fully qualified as "
+        f"{catalog}.<schema>.<table>. Never omit the catalog. Never invent, guess, or "
+        f"substitute a different catalog name. Never use current_catalog(), a workspace "
+        f"default catalog, or a user default catalog — only the literal string \"{catalog}\"."
+    )
+
+
+def generate_sql_from_question(question: str, schema_context: str, catalog: str) -> str:
     """A single read-only SELECT statement answering `question` — or the
     literal string NO_SQL_NEEDED if the question isn't about this
     warehouse's data (e.g. a general/conceptual question), so the AI
@@ -116,7 +133,8 @@ def generate_sql_from_question(question: str, schema_context: str) -> str:
 
     Grounded in `schema_context` (the real table/column list, relationships,
     and business descriptions — see utils.agent) so the model can't invent a
-    table or column that doesn't exist in this warehouse.
+    table or column that doesn't exist in this warehouse. `catalog` is the
+    single configured catalog every reference must use — see _catalog_mandate.
     """
     prompt = (
         "You are a SQL assistant for a Databricks SQL warehouse (Delta Lake, "
@@ -128,22 +146,28 @@ def generate_sql_from_question(question: str, schema_context: str) -> str:
         "table or column name that isn't listed — write a single read-only SELECT "
         "statement that answers the question, using the listed relationships for "
         "join keys. Return ONLY the SQL statement: no markdown fences, no commentary.\n\n"
+        f"{_catalog_mandate(catalog)}\n\n"
         f"Schema:\n{schema_context}\n\nQuestion: {question}"
     )
     return _strip_code_fence(generate_content(prompt))
 
 
-def fix_sql_from_error(question: str, schema_context: str, failed_sql: str, error_message: str) -> str:
+def fix_sql_from_error(
+    question: str, schema_context: str, failed_sql: str, error_message: str, catalog: str
+) -> str:
     """A corrected SELECT statement after `failed_sql` errored against the
     warehouse — the AI Assistant's one automatic retry, grounded in the same
     real schema context plus the actual error text, so the retry has a
     concrete reason to differ rather than repeating the same mistake.
+    `catalog` is repeated here too: a wrong-catalog failure must not be
+    "fixed" into a different wrong catalog.
     """
     prompt = (
         "The following SQL query failed against a Databricks SQL warehouse. Using "
         "ONLY the tables and columns listed below, fix the query so it correctly "
         "answers the original question. Return ONLY the corrected SQL statement: no "
         "markdown fences, no commentary.\n\n"
+        f"{_catalog_mandate(catalog)}\n\n"
         f"Schema:\n{schema_context}\n\nOriginal question: {question}\n\n"
         f"Failed SQL:\n{failed_sql}\n\nError:\n{error_message}"
     )
