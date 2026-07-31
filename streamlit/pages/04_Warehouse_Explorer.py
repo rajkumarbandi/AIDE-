@@ -15,6 +15,7 @@ import streamlit as st
 from components.charts import render_bar_chart
 from components.filters import get_filters
 from components.header import render_page_header
+from components.shell import render_app_shell
 from components.tables import render_dataframe, render_empty_state
 from utils.config import DEFAULT_BRONZE_SCHEMA, DEFAULT_GOLD_SCHEMA, DEFAULT_SILVER_SCHEMA
 from utils.databricks import DatabricksConnectionError, DatabricksQueryError, run_query
@@ -27,6 +28,8 @@ from utils.queries import (
     sql_information_schema_tables,
     sql_preview_table,
 )
+
+render_app_shell()
 
 render_page_header(
     title="Warehouse Explorer",

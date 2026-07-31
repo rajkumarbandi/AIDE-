@@ -12,6 +12,7 @@ import streamlit as st
 from components.chat import render_chat_history, render_chat_input
 from components.filters import get_filters
 from components.header import render_page_header
+from components.shell import render_app_shell
 from components.sql_editor import render_sql_editor
 from components.tables import render_dataframe, render_empty_state
 from utils.databricks import (
@@ -30,6 +31,8 @@ from utils.gemini import (
     generate_sql_from_question,
 )
 from utils.queries import sql_schema_columns
+
+render_app_shell()
 
 render_page_header(
     title="AI Assistant",

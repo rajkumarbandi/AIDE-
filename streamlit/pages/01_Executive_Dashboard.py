@@ -15,6 +15,7 @@ from components.charts import render_bar_chart, render_line_chart, render_pie_ch
 from components.filters import get_filters
 from components.header import render_page_header
 from components.kpi_cards import render_kpi_row
+from components.shell import render_app_shell
 from components.tables import render_dataframe, render_empty_state
 from utils.databricks import DatabricksConnectionError, DatabricksQueryError, run_query
 from utils.gemini import GeminiClientError, GeminiConfigurationError, generate_executive_summary
@@ -30,6 +31,8 @@ from utils.queries import (
     sql_top_customers,
     sql_top_products,
 )
+
+render_app_shell()
 
 render_page_header(
     title="Executive Dashboard",

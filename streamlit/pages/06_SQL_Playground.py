@@ -15,6 +15,7 @@ import streamlit as st
 
 from components.filters import get_filters
 from components.header import render_page_header
+from components.shell import render_app_shell
 from components.sql_editor import render_sql_editor, set_sql_editor_value
 from components.tables import render_dataframe, render_empty_state
 from utils.databricks import (
@@ -25,6 +26,8 @@ from utils.databricks import (
     validate_select_only,
 )
 from utils.helpers import truncate_text
+
+render_app_shell()
 
 render_page_header(
     title="SQL Playground",

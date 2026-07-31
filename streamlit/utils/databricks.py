@@ -15,6 +15,7 @@ import streamlit as st
 from databricks import sql as databricks_sql
 
 from utils.config import DATA_CACHE_TTL_SECONDS
+from utils.secrets import get_setting
 
 logger = logging.getLogger("aide.databricks")
 
@@ -75,18 +76,25 @@ def validate_select_only(sql: str) -> None:
 
 
 def _get_connection_params() -> dict:
-    try:
-        creds = st.secrets["databricks"]
-        return {
-            "server_hostname": creds["server_hostname"],
-            "http_path": creds["http_path"],
-            "access_token": creds["access_token"],
-        }
-    except Exception as exc:
+    """Resolve connection params: environment variables (Databricks Apps'
+    documented secrets mechanism) first, then st.secrets (local dev).
+    """
+    server_hostname = get_setting("DATABRICKS_SERVER_HOSTNAME", ("databricks", "server_hostname"))
+    http_path = get_setting("DATABRICKS_HTTP_PATH", ("databricks", "http_path"))
+    access_token = get_setting("DATABRICKS_TOKEN", ("databricks", "access_token"))
+
+    if not (server_hostname and http_path and access_token):
         raise DatabricksConnectionError(
-            "Databricks connection is not configured. Add a [databricks] section "
-            "(server_hostname, http_path, access_token) to .streamlit/secrets.toml."
-        ) from exc
+            "Databricks connection is not configured. Set DATABRICKS_SERVER_HOSTNAME, "
+            "DATABRICKS_HTTP_PATH, and DATABRICKS_TOKEN as environment variables (Databricks "
+            "Apps — see app.yaml) or add a [databricks] section (server_hostname, http_path, "
+            "access_token) to .streamlit/secrets.toml (local development)."
+        )
+    return {
+        "server_hostname": server_hostname,
+        "http_path": http_path,
+        "access_token": access_token,
+    }
 
 
 @st.cache_resource(show_spinner=False)

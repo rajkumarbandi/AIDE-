@@ -86,6 +86,15 @@ html, body, [class*="css"] {
   margin-bottom: 8px;
 }
 
+/* Classic multipage (pages/ directory) auto-generates its own sidebar nav
+   list; components/shell.py renders a custom one (with icons, via
+   st.page_link) instead, so the default list is hidden here. Purely
+   cosmetic — if this selector ever stops matching a future Streamlit
+   version's DOM, the only consequence is both lists showing, never a crash. */
+[data-testid="stSidebarNav"] {
+  display: none;
+}
+
 /* Sidebar section labels (Connection Status, Warehouse Status, ...) */
 .aide-sidebar-label {
   font-size: 11px;

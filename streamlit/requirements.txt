@@ -1,5 +1,13 @@
-streamlit>=1.38
+# streamlit is pinned exactly (not a floor) because Azure Databricks Apps
+# pre-installs its own Streamlit version; if a floor constraint like >=1.38
+# is already satisfied by that pre-installed version, pip's default behavior
+# is to leave it in place rather than upgrade — silently running the app
+# against an untested version. An exact pin forces Databricks Apps to
+# install this specific, locally-tested version instead (Databricks' own
+# docs confirm a requirements.txt version overrides the pre-installed one).
+streamlit==1.60.0
 pandas>=2.0
+numpy>=2.0
 plotly>=5.20
 networkx>=3.2
 databricks-sql-connector>=3.0

@@ -1,46 +1,23 @@
 """AIDE — application entry point.
 
-Sets page config/theme once, defines the 7-page navigation, and renders the
-persistent sidebar shell (branding, global filters, connection status) that
-appears identically on every page — the actual page content is delegated to
-st.navigation()/.run(), per Streamlit's current (st.Page-based) multipage
-pattern.
-"""
+Classic filename-based multipage (the pages/ directory, auto-discovered by
+Streamlit because it sits next to this entry-point script) replaces the
+previous st.Page()/st.navigation() implementation, which crashed on Azure
+Databricks Apps with `AttributeError: 'StreamlitPage' object has no
+attribute '_default'`. Classic multipage has been stable across a much wider
+range of Streamlit versions and removes that whole newer-API surface.
 
-from pathlib import Path
+Under classic multipage, this file is always the default/first page shown —
+it does not automatically become "whichever page was previously the
+default" the way st.Page(..., default=True) did. To preserve the original
+"Executive Dashboard is the landing page" behavior without duplicating that
+page's logic here, this file immediately redirects to it via st.switch_page
+(a simple, standalone primitive, unrelated to the st.navigation()/st.Page()
+API that crashed).
+"""
 
 import streamlit as st
 
-from components.filters import render_global_filters
-from components.sidebar import render_sidebar_status
-from components.styles import apply_theme
-from utils.config import APP_ICON, APP_TITLE, NAV_PAGES
+from utils.config import NAV_PAGES
 
-_ASSETS_DIR = Path(__file__).parent / "assets"
-
-st.set_page_config(
-    page_title=APP_TITLE,
-    page_icon=APP_ICON,
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-apply_theme()
-
-pages = [
-    st.Page(nav["path"], title=nav["title"], icon=nav["icon"], default=(i == 0))
-    for i, nav in enumerate(NAV_PAGES)
-]
-navigation = st.navigation(pages)
-
-with st.sidebar:
-    logo_path = _ASSETS_DIR / "logo.png"
-    if logo_path.exists():
-        st.image(str(logo_path), width=56)
-    st.markdown(f"**{APP_TITLE}**")
-    st.divider()
-    filters = render_global_filters()
-    st.divider()
-    render_sidebar_status(catalog=filters["catalog"], schema=filters["schema"])
-
-navigation.run()
+st.switch_page(NAV_PAGES[0]["path"])

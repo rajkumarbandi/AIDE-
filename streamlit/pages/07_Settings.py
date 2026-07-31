@@ -10,6 +10,7 @@ import streamlit as st
 
 from components.filters import get_filters
 from components.header import render_page_header
+from components.shell import render_app_shell
 from utils.config import APP_VERSION
 from utils.databricks import (
     DatabricksConnectionError,
@@ -18,6 +19,8 @@ from utils.databricks import (
     run_query_timed,
 )
 from utils.gemini import GeminiClientError, GeminiConfigurationError, generate_content, is_configured
+
+render_app_shell()
 
 render_page_header(
     title="Settings",

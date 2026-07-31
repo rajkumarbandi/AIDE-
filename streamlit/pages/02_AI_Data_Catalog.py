@@ -15,6 +15,7 @@ import streamlit as st
 from components.filters import get_filters
 from components.header import render_page_header
 from components.metric_cards import render_metric_grid
+from components.shell import render_app_shell
 from components.tables import render_dataframe, render_empty_state
 from utils.databricks import DatabricksConnectionError, DatabricksQueryError, run_query
 from utils.gemini import GeminiClientError, GeminiConfigurationError, generate_content
@@ -27,6 +28,8 @@ from utils.queries import (
     sql_information_schema_columns,
     sql_table_metadata,
 )
+
+render_app_shell()
 
 render_page_header(
     title="AI Data Catalog",

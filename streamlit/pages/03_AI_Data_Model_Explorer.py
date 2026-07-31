@@ -28,6 +28,7 @@ import streamlit as st
 from components.filters import get_filters
 from components.graph import build_graph, render_graph, render_legend
 from components.header import render_page_header
+from components.shell import render_app_shell
 from components.tables import render_dataframe, render_empty_state
 from utils.config import DEFAULT_BRONZE_SCHEMA, DEFAULT_GOLD_SCHEMA, DEFAULT_SILVER_SCHEMA
 from utils.databricks import DatabricksConnectionError, DatabricksQueryError, run_query
@@ -44,6 +45,8 @@ from utils.queries import (
     sql_preview_table,
     sql_table_metadata,
 )
+
+render_app_shell()
 
 render_page_header(
     title="AI Data Model Explorer",

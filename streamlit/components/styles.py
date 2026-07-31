@@ -1,15 +1,18 @@
 """Theme application — injects assets/style.css once per page render.
 
-Called at the top of app.py, which (via st.navigation) means it applies to
-every page automatically. Individual page files don't need to call this
-themselves.
+Called by components/shell.py::render_app_shell(), so every page applies it
+independently (classic multipage runs each page as its own script — see
+components/shell.py's docstring for why that matters).
 """
 
+import logging
 from pathlib import Path
 
 import streamlit as st
 
-_CSS_PATH = Path(__file__).parent.parent / "assets" / "style.css"
+logger = logging.getLogger("aide.styles")
+
+_CSS_PATH = Path(__file__).resolve().parent.parent / "assets" / "style.css"
 
 _LIGHT_OVERRIDES = """
 :root {
@@ -29,7 +32,12 @@ def apply_theme() -> None:
     global filter (session_state["aide_theme"]) is set to "Light". Dark is the
     default, per the app's design brief.
     """
-    css = _CSS_PATH.read_text(encoding="utf-8")
+    try:
+        css = _CSS_PATH.read_text(encoding="utf-8")
+    except OSError as exc:
+        logger.warning("Could not load %s: %s — continuing without custom styling.", _CSS_PATH, exc)
+        return
+
     if st.session_state.get("aide_theme", "Dark") == "Light":
         css += _LIGHT_OVERRIDES
     st.markdown(f"<style>{css}</style>", unsafe_allow_html=True)

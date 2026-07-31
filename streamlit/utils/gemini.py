@@ -10,6 +10,8 @@ import logging
 import streamlit as st
 from google import genai
 
+from utils.secrets import get_setting
+
 logger = logging.getLogger("aide.gemini")
 
 DEFAULT_MODEL = "gemini-3.6-flash"
@@ -25,13 +27,16 @@ class GeminiConfigurationError(GeminiClientError):
 
 @st.cache_resource(show_spinner=False)
 def _get_client() -> genai.Client:
-    try:
-        api_key = st.secrets["gemini"]["api_key"]
-    except Exception as exc:
+    """Resolve the API key: environment variable (Databricks Apps' documented
+    secrets mechanism) first, then st.secrets (local dev).
+    """
+    api_key = get_setting("GEMINI_API_KEY", ("gemini", "api_key"))
+    if not api_key:
         raise GeminiConfigurationError(
-            "Gemini API key is not configured. Add [gemini] api_key to "
-            ".streamlit/secrets.toml."
-        ) from exc
+            "Gemini API key is not configured. Set GEMINI_API_KEY as an environment "
+            "variable (Databricks Apps — see app.yaml) or add [gemini] api_key to "
+            ".streamlit/secrets.toml (local development)."
+        )
     return genai.Client(api_key=api_key)
 
 

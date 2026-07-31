@@ -1,0 +1,30 @@
+# Databricks Apps deployment manifest.
+#
+# Without this file, Databricks Apps runs the app's first .py file with a
+# plain `python <file>.py` instead of `streamlit run` — which bypasses
+# Streamlit's own script-runner bootstrap and is a documented cause of
+# broken/uninitialized navigation state. The explicit `command` below is
+# what makes Databricks invoke Streamlit correctly.
+#
+# Secrets: Databricks Apps' documented mechanism is env-var injection via a
+# bound resource (SQL warehouse / secret scope), referenced here with
+# `valueFrom`, NOT .streamlit/secrets.toml (which this app still supports
+# for local development — see utils/secrets.py). Configure the matching
+# resources in the Databricks Apps UI or databricks.yml before deploying;
+# until then, the app starts normally and shows a friendly "not configured"
+# state in the sidebar/Settings page instead of crashing.
+#
+# Not set here: STREAMLIT_SERVER_PORT/ADDRESS/HEADLESS and
+# STREAMLIT_BROWSER_GATHER_USAGE_STATS — Databricks Apps sets these
+# automatically at runtime; redeclaring them would be redundant.
+command: ['streamlit', 'run', 'app.py']
+
+env:
+  - name: 'DATABRICKS_SERVER_HOSTNAME'
+    valueFrom: 'databricks_server_hostname'
+  - name: 'DATABRICKS_HTTP_PATH'
+    valueFrom: 'databricks_http_path'
+  - name: 'DATABRICKS_TOKEN'
+    valueFrom: 'databricks_token'
+  - name: 'GEMINI_API_KEY'
+    valueFrom: 'gemini_api_key'
