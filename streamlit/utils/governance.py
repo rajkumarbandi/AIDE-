@@ -62,6 +62,26 @@ def _execute(sql: str, params: Optional[dict] = None) -> None:
         ) from exc
 
 
+def _existing_columns(catalog: str, schema: str, table: str) -> set:
+    df = _fetch(
+        "SELECT column_name FROM "
+        f"{catalog}.information_schema.columns WHERE table_schema = '{schema}' "
+        f"AND table_name = '{table}'"
+    )
+    return set(df["column_name"]) if not df.empty else set()
+
+
+def _add_column_if_missing(catalog: str, schema: str, table: str, column: str, sql_type: str) -> None:
+    """Verified directly against this warehouse: `ADD COLUMNS IF NOT EXISTS` is not
+    valid syntax here (confirmed via a real PARSE_SYNTAX_ERROR) — re-adding an
+    existing column raises FIELD_ALREADY_EXISTS instead of being a no-op, so this
+    checks information_schema.columns first and only alters when genuinely missing.
+    """
+    if column in _existing_columns(catalog, schema, table):
+        return
+    _execute(f"ALTER TABLE {_full_table(catalog, schema, table)} ADD COLUMNS ({column} {sql_type})")
+
+
 def _fetch(sql: str) -> pd.DataFrame:
     """A dedicated, UNCACHED read path (unlike utils.databricks.run_query) —
     governance data must reflect a write immediately (e.g. right after
@@ -84,35 +104,47 @@ def _fetch(sql: str) -> pd.DataFrame:
 
 @st.cache_resource(show_spinner=False)
 def ensure_tables(catalog: str, schema: str) -> bool:
-    """Create the governance tables if they don't exist yet — cached so this
-    DDL runs at most once per app session, not on every page view.
+    """Create the governance tables if they don't exist yet, and add any
+    columns introduced since (checking information_schema.columns first, so
+    a column that already exists in a real deployment is never touched) —
+    cached so this DDL runs at most once per app session, not on every page view.
     """
-    comments_sql = f"""
-    CREATE TABLE IF NOT EXISTS {_full_table(catalog, schema, _COMMENTS_TABLE)} (
-        comment_id STRING,
-        affected_table STRING,
-        affected_column STRING,
-        comment_text STRING,
-        reason STRING,
-        suggested_change STRING,
-        author STRING,
-        priority STRING,
-        status STRING,
-        created_at TIMESTAMP,
-        updated_at TIMESTAMP
-    ) USING DELTA
-    """
-    replies_sql = f"""
-    CREATE TABLE IF NOT EXISTS {_full_table(catalog, schema, _REPLIES_TABLE)} (
-        reply_id STRING,
-        comment_id STRING,
-        reply_text STRING,
-        author STRING,
-        created_at TIMESTAMP
-    ) USING DELTA
-    """
-    _execute(comments_sql)
-    _execute(replies_sql)
+    comments_table = _full_table(catalog, schema, _COMMENTS_TABLE)
+    replies_table = _full_table(catalog, schema, _REPLIES_TABLE)
+
+    _execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {comments_table} (
+            comment_id STRING,
+            affected_table STRING,
+            affected_column STRING,
+            comment_text STRING,
+            reason STRING,
+            suggested_change STRING,
+            author STRING,
+            priority STRING,
+            status STRING,
+            created_at TIMESTAMP,
+            updated_at TIMESTAMP
+        ) USING DELTA
+        """
+    )
+    _execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {replies_table} (
+            reply_id STRING,
+            comment_id STRING,
+            reply_text STRING,
+            author STRING,
+            created_at TIMESTAMP
+        ) USING DELTA
+        """
+    )
+    # Added after the tables above first shipped — a real deployment may already
+    # have them without this column, so add it in place rather than assuming a
+    # fresh CREATE TABLE IF NOT EXISTS would ever pick it up.
+    _add_column_if_missing(catalog, schema, _COMMENTS_TABLE, "author_email", "STRING")
+    _add_column_if_missing(catalog, schema, _REPLIES_TABLE, "author_email", "STRING")
     return True
 
 
@@ -121,21 +153,27 @@ def submit_comment(
     schema: str,
     affected_table: str,
     comment_text: str,
-    author: str,
+    reviewer: dict,
     priority: str = "Medium",
     affected_column: Optional[str] = None,
     reason: Optional[str] = None,
     suggested_change: Optional[str] = None,
 ) -> str:
-    """Insert a new reviewer comment with status "New"; returns its comment_id."""
+    """Insert a new reviewer comment with status "New"; returns its comment_id.
+
+    `reviewer` is the dict returned by utils.identity.get_current_user() —
+    {"name", "email", "source"} — never manually-typed free text; the
+    reviewer's identity is always resolved automatically, not asked for.
+    """
     ensure_tables(catalog, schema)
     comment_id = str(uuid.uuid4())
     sql = f"""
     INSERT INTO {_full_table(catalog, schema, _COMMENTS_TABLE)}
     (comment_id, affected_table, affected_column, comment_text, reason, suggested_change,
-     author, priority, status, created_at, updated_at)
+     author, author_email, priority, status, created_at, updated_at)
     VALUES (:comment_id, :affected_table, :affected_column, :comment_text, :reason,
-            :suggested_change, :author, :priority, 'New', current_timestamp(), current_timestamp())
+            :suggested_change, :author, :author_email, :priority, 'New', current_timestamp(),
+            current_timestamp())
     """
     _execute(
         sql,
@@ -146,7 +184,8 @@ def submit_comment(
             "comment_text": comment_text,
             "reason": reason,
             "suggested_change": suggested_change,
-            "author": author,
+            "author": reviewer["name"],
+            "author_email": reviewer.get("email"),
             "priority": priority,
         },
     )
@@ -164,12 +203,15 @@ def update_comment_status(catalog: str, schema: str, comment_id: str, new_status
     _execute(sql, {"new_status": new_status, "comment_id": comment_id})
 
 
-def add_reply(catalog: str, schema: str, comment_id: str, reply_text: str, author: str) -> None:
+def add_reply(catalog: str, schema: str, comment_id: str, reply_text: str, reviewer: dict) -> None:
+    """`reviewer` is the dict returned by utils.identity.get_current_user() —
+    see submit_comment's docstring for why this is never manually-typed text.
+    """
     ensure_tables(catalog, schema)
     sql = f"""
     INSERT INTO {_full_table(catalog, schema, _REPLIES_TABLE)}
-    (reply_id, comment_id, reply_text, author, created_at)
-    VALUES (:reply_id, :comment_id, :reply_text, :author, current_timestamp())
+    (reply_id, comment_id, reply_text, author, author_email, created_at)
+    VALUES (:reply_id, :comment_id, :reply_text, :author, :author_email, current_timestamp())
     """
     _execute(
         sql,
@@ -177,7 +219,8 @@ def add_reply(catalog: str, schema: str, comment_id: str, reply_text: str, autho
             "reply_id": str(uuid.uuid4()),
             "comment_id": comment_id,
             "reply_text": reply_text,
-            "author": author,
+            "author": reviewer["name"],
+            "author_email": reviewer.get("email"),
         },
     )
 

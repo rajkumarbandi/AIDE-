@@ -22,13 +22,14 @@ import streamlit as st
 
 from components.filters import get_filters
 from components.header import render_page_header
-from components.metric_cards import layer_badge, render_metric_grid
+from components.metric_cards import layer_badge, processing_status_badge, render_metric_grid
 from components.shell import render_app_shell
 from components.tables import render_dataframe, render_empty_state
 from utils.config import DEFAULT_GOLD_SCHEMA, DEFAULT_METADATA_SCHEMA, DEFAULT_SILVER_SCHEMA
 from utils.databricks import DatabricksConnectionError, DatabricksQueryError, run_query
 from utils.gemini import GeminiClientError, GeminiConfigurationError, generate_content
 from utils.governance import PRIORITIES, GovernanceError, load_comments, submit_comment
+from utils.identity import get_current_user
 from utils.helpers import format_number, format_pct, parse_nested_field, to_plain_list
 from utils.queries import (
     GOLD_LINEAGE,
@@ -186,8 +187,24 @@ def _render_table_detail(table_name: str, layer: str, meta_row: pd.Series) -> No
             col1, col2 = st.columns(2)
             col1.metric("Health Score", latest.get("health_score", "—"))
             col2.metric("Confidence Score", latest.get("confidence_score", "—"))
+
+            # Incremental-processing tracking fields — only present once
+            # 02_ai_metadata/03_metadata_analyzer_poc.py has been run against this
+            # warehouse since its incremental-tracking rewrite; absent (None) on
+            # data from before that migration, shown as "—" rather than guessed.
+            processing_status = latest.get("processing_status")
+            if processing_status is not None:
+                st.markdown(f"{processing_status_badge(processing_status)}", unsafe_allow_html=True)
+                col3, col4, col5 = st.columns(3)
+                col3.metric("Retry Count", latest.get("retry_count", "—"))
+                col4.metric("Processed By", latest.get("processed_by") or "—")
+                col5.metric("AI Model", latest.get("ai_model_used") or "—")
+                if processing_status == "FAILED" and latest.get("last_error_message"):
+                    st.error(f"Last error: {latest['last_error_message']}")
+
             st.markdown(latest.get("analysis_markdown") or "_No content stored._")
-            st.caption(f"Last Refresh: {latest.get('analysis_timestamp', '—')}")
+            last_refresh = latest.get("last_processed_time") or latest.get("analysis_timestamp") or "—"
+            st.caption(f"Last Refresh: {last_refresh}")
         else:
             render_empty_state(
                 f"No AI analysis stored yet for '{table_name}'{' (' + layer + ' layer)' if layer != 'bronze' else ''}.",
@@ -255,10 +272,12 @@ def _render_comments_tab(table_name: str) -> None:
     on the dedicated 🛡 Data Governance page; this tab is for raising and
     tracking issues from the table you're actually looking at.
     """
+    reviewer = get_current_user()
     st.caption(
-        "Flag incorrect metadata, suggest a better description, report a wrong relationship "
-        "or profiling figure, or request documentation — every comment is tracked with a "
-        "status on the 🛡 Data Governance page."
+        f"Flag incorrect metadata, suggest a better description, report a wrong relationship "
+        f"or profiling figure, or request documentation — every comment is tracked with a "
+        f"status on the 🛡 Data Governance page. Submitting as **{reviewer['name']}** "
+        f"(identity resolved automatically, not typed in)."
     )
 
     with st.form(key=f"comment_form_{table_name}", clear_on_submit=True):
@@ -279,7 +298,6 @@ def _render_comments_tab(table_name: str) -> None:
             )
         with col2:
             priority = st.selectbox("Priority", PRIORITIES, index=1, key=f"priority_{table_name}")
-            author = st.text_input("Your name", key=f"author_{table_name}", placeholder="e.g. Jane Doe")
 
         comment_text = st.text_area("Comment", key=f"comment_{table_name}")
         suggested_change = st.text_area(
@@ -287,13 +305,13 @@ def _render_comments_tab(table_name: str) -> None:
         )
 
         if st.form_submit_button("Submit Comment"):
-            if not comment_text.strip() or not author.strip():
-                st.warning("A comment and your name are both required.")
+            if not comment_text.strip():
+                st.warning("Enter a comment first.")
             else:
                 try:
                     submit_comment(
                         catalog, DEFAULT_METADATA_SCHEMA, table_name, comment_text.strip(),
-                        author.strip(), priority=priority,
+                        reviewer=reviewer, priority=priority,
                         affected_column=affected_column.strip() or None,
                         reason=reason, suggested_change=suggested_change.strip() or None,
                     )

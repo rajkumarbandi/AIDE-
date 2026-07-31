@@ -33,9 +33,13 @@ _LAYER_X = {"bronze": 0, "silver": 2.6, "metadata": 2.6, "gold": 5.2}
 _ROW_SPACING = 1.3
 _BOX_WIDTH = 1.9
 _BOX_HEIGHT = 0.85
+_HEADER_FRACTION = 0.34  # top slice of the box reserved for the table-name band
 _HIGHLIGHT_COLOR = "#2563eb"
 _MUTED_EDGE_COLOR = "#4b5563"
+_HEADER_FILL = "#0e1117"
 _MAX_KEY_LINE_ITEMS = 3
+_STAR_SPOKE_SPACING = _BOX_WIDTH + 0.7
+_STAR_SPOKE_ROW_Y = _ROW_SPACING * 1.8
 
 
 def build_graph(nodes: list, edges: list) -> nx.DiGraph:
@@ -62,6 +66,28 @@ def _layered_positions(graph: nx.DiGraph) -> dict:
         x = _LAYER_X.get(layer, 0)
         for i, node_id in enumerate(sorted(node_ids)):
             positions[node_id] = (x, -i * _ROW_SPACING)
+    return positions
+
+
+def _star_positions(graph: nx.DiGraph) -> dict:
+    """A clean hub-and-spokes layout for a small, focused subgraph (e.g. one
+    fact table + its dimensions) — the hub (highest-degree node) sits at the
+    origin; every other node is spread evenly along a single row above it.
+    Every spoke connects only to the hub, never to another spoke, so this
+    layout has zero line crossings by construction, unlike a generic
+    force-directed graph — exactly the "clean, professional ERD" quality bar
+    a 60+ table full-lineage view can't realistically hit at that density.
+    """
+    if not graph.nodes:
+        return {}
+    hub = max(graph.nodes, key=lambda n: graph.degree(n))
+    spokes = sorted(n for n in graph.nodes if n != hub)
+
+    positions = {hub: (0.0, 0.0)}
+    count = len(spokes)
+    start_x = -(count - 1) * _STAR_SPOKE_SPACING / 2
+    for i, node_id in enumerate(spokes):
+        positions[node_id] = (start_x + i * _STAR_SPOKE_SPACING, _STAR_SPOKE_ROW_Y)
     return positions
 
 
@@ -113,17 +139,32 @@ def _box_edge_anchor(x0: float, y0: float, x1: float, y1: float) -> tuple:
 
 
 def render_graph(
-    graph: nx.DiGraph, key: str = "aide_warehouse_graph", highlight_node: Optional[str] = None
+    graph: nx.DiGraph,
+    key: str = "aide_warehouse_graph",
+    highlight_node: Optional[str] = None,
+    layout: str = "layered",
 ) -> Optional[dict]:
     """Render the ER diagram. Returns {"type": "node", "id": ...} or
     {"type": "edge", "source": ..., "target": ...} for whatever was clicked,
     or None if nothing is selected this run.
 
+    `layout`: "layered" (default — Bronze/Silver/Gold columns, for the full
+    lineage view) or "star" (a hub + its direct neighbors only, laid out via
+    _star_positions — the focused, no-crossings view for a single fact table
+    and its dimensions).
+
     If `highlight_node` is set, edges touching that node (and that node's own
     box border) are drawn in the accent color and thicker; everything else
     stays muted — the "click table to highlight relationships" behavior.
+
+    Cardinality is labeled at each real FK edge's endpoints ("1" nearest the
+    referenced/parent table, "N" nearest the referencing/child table) — a
+    Plotly-native substitute for crow's-foot notation glyphs, which Plotly's
+    shape system has no built-in support for. Bronze->Silver->Gold lineage
+    ("feeds") edges are not foreign keys and are never labeled with a
+    cardinality, which would otherwise be a fabricated claim.
     """
-    positions = _layered_positions(graph)
+    positions = _star_positions(graph) if layout == "star" else _layered_positions(graph)
     node_ids = list(graph.nodes())
 
     shapes = []
@@ -153,6 +194,24 @@ def render_graph(
         edge_midpoint_y.append((start[1] + end[1]) / 2)
         edge_midpoint_ids.append(f"{source}::{target}")
 
+        # Cardinality labels only apply to real FK edges (GOLD_RELATIONSHIPS —
+        # `target` is the referenced/parent "1" side, `source` the referencing/
+        # child "N" side). A bronze->silver->gold lineage ("feeds") edge isn't a
+        # foreign key at all, so labeling it with a cardinality would be a
+        # fabricated claim, not a fact — it's deliberately skipped.
+        if graph.edges[source, target].get("label") != "feeds":
+            label_color = _HIGHLIGHT_COLOR if is_highlighted else "#9aa4b2"
+            near_start = (start[0] + (end[0] - start[0]) * 0.12, start[1] + (end[1] - start[1]) * 0.12)
+            near_end = (end[0] + (start[0] - end[0]) * 0.12, end[1] + (start[1] - end[1]) * 0.12)
+            annotations.append(
+                dict(x=near_start[0], y=near_start[1], text="N", showarrow=False,
+                     font=dict(color=label_color, size=11, family="monospace"))
+            )
+            annotations.append(
+                dict(x=near_end[0], y=near_end[1], text="1", showarrow=False,
+                     font=dict(color=label_color, size=11, family="monospace"))
+            )
+
     edge_click_trace = go.Scatter(
         x=edge_midpoint_x,
         y=edge_midpoint_y,
@@ -173,32 +232,59 @@ def render_graph(
         border_color = _HIGHLIGHT_COLOR if is_highlighted else "#0e1117"
         border_width = 3 if is_highlighted else 1.5
 
+        box_top = y + _BOX_HEIGHT / 2
+        box_bottom = y - _BOX_HEIGHT / 2
+        header_bottom = box_top - _BOX_HEIGHT * _HEADER_FRACTION
+
+        # Body first (fill=layer/kind color), then a distinct, darker header
+        # band on top of it — a real database-documentation entity box has a
+        # visually separate title bar, not just a plain colored rectangle.
         shapes.append(
             dict(
                 type="rect",
-                x0=x - _BOX_WIDTH / 2,
-                x1=x + _BOX_WIDTH / 2,
-                y0=y - _BOX_HEIGHT / 2,
-                y1=y + _BOX_HEIGHT / 2,
+                x0=x - _BOX_WIDTH / 2, x1=x + _BOX_WIDTH / 2,
+                y0=box_bottom, y1=box_top,
                 line=dict(color=border_color, width=border_width),
                 fillcolor=color,
                 opacity=0.85 if is_highlighted else 0.55,
                 layer="below",
             )
         )
+        shapes.append(
+            dict(
+                type="rect",
+                x0=x - _BOX_WIDTH / 2, x1=x + _BOX_WIDTH / 2,
+                y0=header_bottom, y1=box_top,
+                line=dict(color=border_color, width=border_width),
+                fillcolor=_HEADER_FILL,
+                opacity=0.92,
+                layer="below",
+            )
+        )
+
+        annotations.append(
+            dict(
+                x=x, y=(header_bottom + box_top) / 2,
+                text=f"<b>{data.get('label', node_id)}</b>",
+                showarrow=False,
+                font=dict(color="#f5f5f5", size=12),
+                align="center",
+            )
+        )
 
         pk_line = _key_line(data.get("pk") or [], "🔑")
         fk_line = _key_line(data.get("fk") or [], "🔗")
-        body_lines = [f"<b>{data.get('label', node_id)}</b>"]
+        body_lines = []
         if pk_line:
             body_lines.append(pk_line)
         if fk_line:
             body_lines.append(fk_line)
+        if not body_lines:
+            body_lines.append("<i>no keys collected</i>")
 
         annotations.append(
             dict(
-                x=x,
-                y=y,
+                x=x, y=(box_bottom + header_bottom) / 2,
                 text="<br>".join(body_lines),
                 showarrow=False,
                 font=dict(color="#f5f5f5", size=11),

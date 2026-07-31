@@ -405,49 +405,91 @@ def _render_edge_detail(rel_source: str, rel_target: str, graph: nx.DiGraph) -> 
         _render_impact_analysis(graph, rel_target)
 
 
+def _build_gold_star_graph() -> tuple:
+    """Just the Gold fact table + its dimensions (KNOWN_GOLD_TABLES minus
+    sales_kpi_summary, which has no FK edges) — a small, focused subgraph
+    for the star-schema view. Real PK/FK from gold_keys_for_table(), same as
+    the full view; no live Bronze metadata query needed for this view.
+    """
+    star_tables = [t for t in KNOWN_GOLD_TABLES]
+    nodes = []
+    for table_name in star_tables:
+        kind = "fact" if table_name.startswith("fact_") else "dimension"
+        primary_keys, foreign_keys = gold_keys_for_table(table_name)
+        nodes.append(
+            {
+                "id": table_name, "label": table_name, "layer": "gold", "kind": kind,
+                "pk": primary_keys, "fk": foreign_keys,
+            }
+        )
+    node_ids = {n["id"] for n in nodes}
+    edges = [
+        {"source": rel["from_table"], "target": rel["to_table"], "label": rel["description"]}
+        for rel in GOLD_RELATIONSHIPS
+        if rel["from_table"] in node_ids and rel["to_table"] in node_ids
+    ]
+    return nodes, edges
+
+
 filters = get_filters()
 
-col_search, col_bronze, col_silver, col_gold = st.columns([3, 1, 1, 1])
-with col_search:
-    search = st.text_input(
-        "🔍 Search tables", placeholder="e.g. customer — shows matches + direct neighbors"
+view_mode = st.radio(
+    "View",
+    ["⭐ Gold Star Schema", "🔗 Full Lineage View"],
+    horizontal=True,
+    key="aide_model_view_mode",
+)
+
+if view_mode == "⭐ Gold Star Schema":
+    st.caption(
+        "The Gold-layer fact table and its dimensions — a focused, no-crossings view. "
+        "Switch to Full Lineage View to see Bronze → Silver → Gold and search across "
+        "every table."
     )
-with col_bronze:
-    show_bronze = st.checkbox("Bronze", value=True, key="aide_show_bronze")
-with col_silver:
-    show_silver = st.checkbox("Silver", value=True, key="aide_show_silver")
-with col_gold:
-    show_gold = st.checkbox("Gold", value=True, key="aide_show_gold")
+    render_legend()
+    nodes, edges = _build_gold_star_graph()
+    metadata_df = None
+    graph_layout = "star"
+else:
+    col_search, col_bronze, col_silver, col_gold = st.columns([3, 1, 1, 1])
+    with col_search:
+        search = st.text_input(
+            "🔍 Search tables", placeholder="e.g. customer — shows matches + direct neighbors"
+        )
+    with col_bronze:
+        show_bronze = st.checkbox("Bronze", value=True, key="aide_show_bronze")
+    with col_silver:
+        show_silver = st.checkbox("Silver", value=True, key="aide_show_silver")
+    with col_gold:
+        show_gold = st.checkbox("Gold", value=True, key="aide_show_gold")
 
-render_legend()
+    render_legend()
 
-metadata_df = _load_bronze_metadata(filters["catalog"])
-if metadata_df is None:
-    st.caption("⚠ Not connected to Databricks — showing the known Silver/Gold warehouse "
-               "structure only, without live Bronze metadata. Connect in ⚙ Settings for "
-               "the full picture.")
+    metadata_df = _load_bronze_metadata(filters["catalog"])
+    if metadata_df is None:
+        st.caption("⚠ Not connected to Databricks — showing the known Silver/Gold warehouse "
+                   "structure only, without live Bronze metadata. Connect in ⚙ Settings for "
+                   "the full picture.")
 
-all_nodes = _build_nodes(metadata_df)
-all_node_ids = {n["id"] for n in all_nodes}
-all_edges = _build_edges(all_node_ids)
+    all_nodes = _build_nodes(metadata_df)
+    all_node_ids = {n["id"] for n in all_nodes}
+    all_edges = _build_edges(all_node_ids)
 
-visible_layers = {layer for layer, show in
-                   [("bronze", show_bronze), ("silver", show_silver), ("gold", show_gold)] if show}
-nodes, edges = _filter_by_layer(all_nodes, all_edges, visible_layers)
-nodes, edges = _filter_by_search(nodes, edges, search)
+    visible_layers = {layer for layer, show in
+                       [("bronze", show_bronze), ("silver", show_silver), ("gold", show_gold)] if show}
+    nodes, edges = _filter_by_layer(all_nodes, all_edges, visible_layers)
+    nodes, edges = _filter_by_search(nodes, edges, search)
+    graph_layout = "layered"
 
 if not nodes:
-    render_empty_state(
-        "No tables match the current search/layer filters." if (search or len(visible_layers) < 3)
-        else "No warehouse structure available yet.",
-        icon="🧠",
-    )
+    render_empty_state("No tables match the current search/layer filters.", icon="🧠")
 else:
-    st.caption(f"Showing {len(nodes)} of {len(all_nodes)} tables")
+    if view_mode == "🔗 Full Lineage View":
+        st.caption(f"Showing {len(nodes)} of {len(all_nodes)} tables")
     graph = build_graph(nodes, edges)
     selected_node = st.session_state.get("aide_selected_node")
 
-    selection = render_graph(graph, highlight_node=selected_node)
+    selection = render_graph(graph, highlight_node=selected_node, layout=graph_layout)
     if selection:
         if selection["type"] == "node":
             st.session_state["aide_selected_node"] = selection["id"]

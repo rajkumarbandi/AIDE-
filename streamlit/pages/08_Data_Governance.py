@@ -7,9 +7,10 @@ Comments are submitted from the AI Data Catalog's per-table "Reviewer
 Comments" tab; this page is where a data owner reviews and actions all of
 them in one place — the enterprise governance workflow itself.
 
-Honesty note: this app has no authentication system, so "author"/"reviewer"
-is a self-reported name typed into a text box, not a verified identity —
-stated plainly rather than implying real access control that doesn't exist.
+Reviewer identity (for status changes and replies) is resolved
+automatically via utils.identity.get_current_user() — the authenticated
+Databricks Apps user when deployed there, or the connected SQL credential's
+identity when run locally — never typed into a text box.
 """
 
 import html
@@ -32,6 +33,7 @@ from utils.governance import (
     load_replies,
     update_comment_status,
 )
+from utils.identity import get_current_user
 
 render_app_shell()
 
@@ -45,9 +47,8 @@ render_page_header(
 filters = get_filters()
 catalog = filters["catalog"]
 
-reviewer_name = st.text_input(
-    "Reviewing as", placeholder="e.g. Jane Doe (data owner)", key="aide_governance_reviewer"
-)
+reviewer = get_current_user()
+st.caption(f"Reviewing as **{reviewer['name']}** (identity resolved automatically).")
 
 try:
     comments_df = load_comments(catalog, DEFAULT_METADATA_SCHEMA)
@@ -154,13 +155,13 @@ else:
                     with st.form(key=f"reply_form_{comment_id}", clear_on_submit=True):
                         reply_text = st.text_input("Add a reply", key=f"reply_text_{comment_id}")
                         if st.form_submit_button("Reply"):
-                            if not reply_text.strip() or not reviewer_name.strip():
-                                st.warning("Enter your name above and a reply first.")
+                            if not reply_text.strip():
+                                st.warning("Enter a reply first.")
                             else:
                                 try:
                                     add_reply(
                                         catalog, DEFAULT_METADATA_SCHEMA, comment_id,
-                                        reply_text.strip(), reviewer_name.strip(),
+                                        reply_text.strip(), reviewer=reviewer,
                                     )
                                     st.rerun()
                                 except GovernanceError as exc:

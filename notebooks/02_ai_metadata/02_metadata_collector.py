@@ -2,18 +2,23 @@
 # MAGIC %md
 # MAGIC # 02 — AI Metadata Collector
 # MAGIC
-# MAGIC Scans every Bronze table in a given catalog/schema and builds a structured metadata
-# MAGIC repository in `<catalog>.metadata.table_metadata`.
+# MAGIC Scans every table in one or more layers (Bronze, Silver, Gold) of a given catalog and
+# MAGIC builds a structured metadata repository in `<catalog>.metadata.table_metadata`.
 # MAGIC
-# MAGIC **Scope (Phase 1 — metadata collection only):** deterministic PySpark/Unity Catalog
-# MAGIC metadata collection. No LLM calls, no AI-generated descriptions, no data quality
-# MAGIC analysis, no Silver/Gold layers, no business rules — those come later, once this
-# MAGIC metadata repository exists for them to read from.
+# MAGIC **Scope:** deterministic PySpark/Unity Catalog metadata collection. No LLM calls, no
+# MAGIC AI-generated descriptions, no data quality judgment calls — that's
+# MAGIC `03_metadata_analyzer_poc.py`'s job, once this metadata repository exists for it to
+# MAGIC read from. This notebook now covers all three medallion layers (previously Bronze
+# MAGIC only) — every layer gets the same metadata enrichment capability.
 # MAGIC
 # MAGIC **Design:** tables are auto-discovered from `information_schema` — no hardcoded table
-# MAGIC names. Onboarding a new Bronze table requires no change here; it's picked up on the
-# MAGIC next run automatically. A failure on one table is logged and skipped, never stopping
-# MAGIC the rest of the scan.
+# MAGIC names. Onboarding a new table in any layer requires no change here; it's picked up on
+# MAGIC the next run automatically. A failure on one table is logged and skipped, never
+# MAGIC stopping the rest of the scan.
+# MAGIC
+# MAGIC **Per-layer overwrite:** a single run only ever replaces the row(s) for the layer(s)
+# MAGIC it actually processed (via Delta's `replaceWhere`) — running with `schema=bronze`
+# MAGIC does not touch previously-collected Silver/Gold rows, and vice versa.
 
 # COMMAND ----------
 
@@ -22,7 +27,7 @@
 # COMMAND ----------
 
 dbutils.widgets.text("catalog", "aide", "Catalog")
-dbutils.widgets.text("schema", "bronze", "Schema")
+dbutils.widgets.text("schema", "ALL", "Schema (bronze, silver, gold, or ALL)")
 
 # COMMAND ----------
 
@@ -72,6 +77,7 @@ logger = logging.getLogger("aide.metadata_collector")
 METADATA_SCHEMA = "metadata"
 METADATA_TABLE = "table_metadata"
 SAMPLE_VALUES_PER_COLUMN = 5
+ALL_LAYERS = ["bronze", "silver", "gold"]
 
 COLUMN_METADATA_SCHEMA = StructType(
     [
@@ -122,10 +128,21 @@ TABLE_METADATA_SCHEMA = StructType(
 # COMMAND ----------
 
 
-def discover_bronze_tables(spark: SparkSession, catalog: str, schema: str) -> list:
+def resolve_target_schemas(schema_widget_value: str) -> list:
+    """Resolve the `schema` widget to a concrete list of layers to scan —
+    `ALL` (case-insensitive) expands to all three medallion layers; anything
+    else is treated as one specific schema name (not necessarily one of the
+    three, so a custom schema name still works for a non-standard layout).
+    """
+    if schema_widget_value.strip().upper() == "ALL":
+        return list(ALL_LAYERS)
+    return [schema_widget_value.strip()]
+
+
+def discover_tables_in_schema(spark: SparkSession, catalog: str, schema: str) -> list:
     """Auto-discover every table (excluding views) in catalog.schema via
-    information_schema — no hardcoded table names, and onboarding a new Bronze table
-    requires no change here.
+    information_schema — no hardcoded table names, and onboarding a new table
+    in any layer requires no change here.
     """
     query = f"""
         SELECT table_name
@@ -382,12 +399,20 @@ def collect_table_metadata(
 # COMMAND ----------
 
 
-def write_metadata_table(spark: SparkSession, rows: list, catalog: str) -> str:
-    """Create the metadata schema if needed and overwrite the metadata repository table.
+def write_metadata_table(
+    spark: SparkSession, rows: list, catalog: str, processed_schemas: list
+) -> str:
+    """Create the metadata schema if needed and write the metadata repository table.
 
-    Overwrite semantics: this notebook always reflects the *current* state of the
-    Bronze layer on each run, not an append-only history — a table dropped from Bronze
-    should disappear from the metadata repository too, not linger as a stale row.
+    Overwrite semantics are now per-layer, not whole-table: this run always reflects
+    the *current* state of whichever layer(s) it actually scanned (`processed_schemas`)
+    — a table dropped from Bronze should disappear from the metadata repository, but a
+    Bronze-only run (schema=bronze) must never wipe out previously-collected Silver/Gold
+    rows. Delta's `replaceWhere` gives exactly this: an atomic, selective overwrite
+    scoped to `schema_name IN (...)`, leaving every other layer's rows untouched. The
+    very first run (table doesn't exist yet) has nothing to selectively preserve, so it
+    does a plain full overwrite instead — `replaceWhere` requires the table to already
+    exist.
     """
     full_table_name = f"{catalog}.{METADATA_SCHEMA}.{METADATA_TABLE}"
     spark.sql(f"CREATE SCHEMA IF NOT EXISTS {catalog}.{METADATA_SCHEMA}")
@@ -398,13 +423,20 @@ def write_metadata_table(spark: SparkSession, rows: list, catalog: str) -> str:
     # literal here; the real value is stamped in afterward via current_timestamp().
     df = spark.createDataFrame([Row(**row) for row in rows], schema=TABLE_METADATA_SCHEMA)
     df = df.withColumn("metadata_collected_at", F.current_timestamp())
-    (
-        df.write.format("delta")
-        .mode("overwrite")
-        .option("overwriteSchema", "true")
-        .saveAsTable(full_table_name)
+
+    writer = df.write.format("delta").mode("overwrite")
+    if spark.catalog.tableExists(full_table_name):
+        quoted_schemas = ", ".join(f"'{s}'" for s in processed_schemas)
+        writer = writer.option("replaceWhere", f"schema_name IN ({quoted_schemas})")
+    else:
+        writer = writer.option("overwriteSchema", "true")
+    writer.saveAsTable(full_table_name)
+
+    logger.info(
+        "Wrote and registered Unity Catalog table '%s' (layers: %s).",
+        full_table_name,
+        ", ".join(processed_schemas),
     )
-    logger.info("Wrote and registered Unity Catalog table '%s'.", full_table_name)
     return full_table_name
 
 
@@ -421,7 +453,8 @@ def print_execution_summary(
     print("AI Metadata Collection Summary")
     print("-" * 60)
     for result in results:
-        print(f"{result['table_name']:<28}{result['status']}")
+        qualified_name = f"{result['schema_name']}.{result['table_name']}"
+        print(f"{qualified_name:<36}{result['status']}")
     print("-" * 60)
     print(f"Metadata Table      : {full_table_name}")
     print(f"Total Tables        : {len(results)}")
@@ -451,29 +484,51 @@ def main() -> None:
     start_time = time.perf_counter()
 
     catalog = dbutils.widgets.get("catalog")
-    schema = dbutils.widgets.get("schema")
+    schema_widget_value = dbutils.widgets.get("schema")
+    target_schemas = resolve_target_schemas(schema_widget_value)
 
-    logger.info("Starting AI metadata collection | catalog=%s schema=%s", catalog, schema)
+    logger.info(
+        "Starting AI metadata collection | catalog=%s schemas=%s", catalog, target_schemas
+    )
 
     try:
-        table_names = discover_bronze_tables(spark, catalog, schema)
-        if not table_names:
-            logger.warning("No tables found in '%s.%s'.", catalog, schema)
-
         collected_rows = []
         results = []
-        for table_name in table_names:
-            try:
-                metadata_row = collect_table_metadata(spark, catalog, schema, table_name)
-                collected_rows.append(metadata_row)
-                results.append({"table_name": table_name, "status": "SUCCESS", "error": None})
-                logger.info("Collected metadata for '%s'.", table_name)
-            except Exception as exc:
-                results.append({"table_name": table_name, "status": "FAILED", "error": str(exc)})
-                logger.error("Metadata collection failed for '%s': %s", table_name, exc)
+        for schema in target_schemas:
+            table_names = discover_tables_in_schema(spark, catalog, schema)
+            if not table_names:
+                logger.warning("No tables found in '%s.%s'.", catalog, schema)
+
+            for table_name in table_names:
+                try:
+                    metadata_row = collect_table_metadata(spark, catalog, schema, table_name)
+                    collected_rows.append(metadata_row)
+                    results.append(
+                        {
+                            "schema_name": schema,
+                            "table_name": table_name,
+                            "status": "SUCCESS",
+                            "error": None,
+                        }
+                    )
+                    logger.info("Collected metadata for '%s.%s'.", schema, table_name)
+                except Exception as exc:
+                    results.append(
+                        {
+                            "schema_name": schema,
+                            "table_name": table_name,
+                            "status": "FAILED",
+                            "error": str(exc),
+                        }
+                    )
+                    logger.error(
+                        "Metadata collection failed for '%s.%s': %s", schema, table_name, exc
+                    )
 
         full_table_name = (
-            write_metadata_table(spark, collected_rows, catalog) if collected_rows else None
+            write_metadata_table(spark, collected_rows, catalog, target_schemas)
+            if collected_rows
+            else None
         )
 
         elapsed_seconds = time.perf_counter() - start_time

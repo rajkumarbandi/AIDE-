@@ -40,6 +40,18 @@ _STATUS_BADGE_KIND = {
 }
 _PRIORITY_BADGE_KIND = {"Low": "info", "Medium": "warning", "High": "warning", "Critical": "error"}
 
+# Metadata AI-analysis processing statuses (02_ai_metadata/03_metadata_analyzer_poc.py's
+# incremental workflow) — a distinct vocabulary from governance comment statuses above,
+# so it gets its own mapping rather than reusing _STATUS_BADGE_KIND (which has no entry
+# for e.g. "SUCCESS"/"FAILED" and would silently fall back to the wrong color).
+_PROCESSING_STATUS_BADGE_KIND = {
+    "PENDING": "info",
+    "PROCESSING": "warning",
+    "SUCCESS": "success",
+    "FAILED": "error",
+    "SKIPPED": "success",  # skipped means "already succeeded", not a failure
+}
+
 
 def render_badge(label: str, kind: str = "info") -> str:
     """Return (not render directly) an inline HTML badge — meant to be
@@ -53,6 +65,13 @@ def render_badge(label: str, kind: str = "info") -> str:
 def status_badge(status: str) -> str:
     """A governance comment status, badge-colored by real workflow meaning."""
     return render_badge(status, _STATUS_BADGE_KIND.get(status, "info"))
+
+
+def processing_status_badge(status: str) -> str:
+    """An AI-analysis processing status (PENDING/PROCESSING/SUCCESS/FAILED/SKIPPED),
+    badge-colored by real workflow meaning — distinct from status_badge() above.
+    """
+    return render_badge(status, _PROCESSING_STATUS_BADGE_KIND.get(status, "info"))
 
 
 def priority_badge(priority: str) -> str:

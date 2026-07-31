@@ -2,23 +2,44 @@
 # MAGIC %md
 # MAGIC # 03 — AI Metadata Analyzer
 # MAGIC
-# MAGIC Production flow:
+# MAGIC Production flow, now incremental and status-tracked:
 # MAGIC
 # MAGIC ```
-# MAGIC Metadata Table -> Read Target Table(s) -> Generate Prompt -> Gemini
-# MAGIC   -> Validate JSON -> Generate Markdown -> Persist -> Display HTML Summary
+# MAGIC table_metadata -> bootstrap PENDING rows -> select PENDING/FAILED -> PROCESSING
+# MAGIC   -> Gemini -> Validate JSON -> Generate Markdown -> SUCCESS/FAILED -> Display HTML Summary
 # MAGIC ```
 # MAGIC
 # MAGIC Reads table metadata from `<metadata_catalog>.metadata.table_metadata` (written by
-# MAGIC `02_metadata_collector.py`), asks Gemini for a strict-JSON analysis via the shared
-# MAGIC client, validates and renders it, and persists one record per analyzed table into
-# MAGIC `<metadata_catalog>.metadata.ai_analysis` (created automatically if it doesn't exist).
+# MAGIC `02_metadata_collector.py`, now covering Bronze, Silver, and Gold), asks Gemini for a
+# MAGIC strict-JSON analysis via the shared client, validates and renders it, and **upserts**
+# MAGIC (not appends) exactly one current row per table into
+# MAGIC `<metadata_catalog>.metadata.ai_analysis`.
 # MAGIC
-# MAGIC **Table selection** (`target_table_name` widget):
-# MAGIC - a specific name (e.g. `customer`) — analyze only that table
-# MAGIC - `ALL` (case-insensitive) — analyze every distinct table_name present in the
-# MAGIC   metadata repository, sequentially; a failure on one table is recorded with
-# MAGIC   `status='FAILED'` and does not stop the rest
+# MAGIC **Incremental processing (the whole point of this rewrite):** a table already marked
+# MAGIC `SUCCESS` is never re-sent to Gemini on a later run — only `PENDING` (new tables) and
+# MAGIC `FAILED` (previous attempt errored) get processed. Running this notebook daily costs
+# MAGIC tokens only for what's actually new or broken, not for re-analyzing everything that
+# MAGIC already succeeded. See "Reprocess controls" below to force re-analysis on demand.
+# MAGIC
+# MAGIC **Every layer, not just Gold:** table selection is keyed by (catalog, schema, table) —
+# MAGIC not table_name alone — because Bronze and Silver both have a table literally named
+# MAGIC `customer` (see SILVER_LINEAGE in the Streamlit app's utils/queries.py); a bare
+# MAGIC table_name key would silently conflate them. The previous version of this notebook had
+# MAGIC exactly that latent bug (masked only because it had never been pointed at more than
+# MAGIC one layer at once).
+# MAGIC
+# MAGIC **Table/layer selection** (`schema` + `target_table_name` widgets):
+# MAGIC - `schema`: `bronze`, `silver`, `gold`, or `ALL` (all three)
+# MAGIC - `target_table_name`: one table name, a comma-separated list, `schema.table` to
+# MAGIC   disambiguate a name that exists in more than one layer, or `ALL`
+# MAGIC
+# MAGIC **Reprocess controls** (`force_reprocess` widget):
+# MAGIC - Default (`No`): only `PENDING`/`FAILED` rows in scope are processed — "reprocess
+# MAGIC   failed tables" is simply what happens automatically, every run, for free.
+# MAGIC - `Yes` ("Force Reprocess"): every in-scope row (including already-`SUCCESS`) is
+# MAGIC   reset to `PENDING` first, then processed — combine with `target_table_name` set to
+# MAGIC   specific names for "Reprocess Selected Tables", or with `schema=<one layer>` and
+# MAGIC   `target_table_name=ALL` for "Reprocess Entire Layer".
 # MAGIC
 # MAGIC **Note:** the metadata sent to Gemini includes real column sample values. That's
 # MAGIC acceptable here because AdventureWorks is synthetic demo data with no real PII —
@@ -41,7 +62,9 @@
 # COMMAND ----------
 
 dbutils.widgets.text("metadata_catalog", "aide", "Metadata Catalog")
-dbutils.widgets.text("target_table_name", "customer", "Target Table Name (or ALL)")
+dbutils.widgets.text("schema", "ALL", "Schema (bronze, silver, gold, or ALL)")
+dbutils.widgets.text("target_table_name", "ALL", "Target Table Name(s) (or ALL)")
+dbutils.widgets.dropdown("force_reprocess", "No", ["No", "Yes"], "Force Reprocess")
 
 # COMMAND ----------
 
@@ -53,7 +76,6 @@ import json
 import logging
 import re
 import time
-from datetime import datetime
 from typing import Optional
 
 from pyspark.sql import Row, SparkSession
@@ -76,63 +98,276 @@ logger = logging.getLogger("aide.metadata_analyzer")
 # COMMAND ----------
 
 
-class MetadataNotFoundError(Exception):
-    """Raised when no metadata row exists for the requested table."""
-
-
 class AIResponseValidationError(Exception):
     """Raised when Gemini's response cannot be parsed as the expected JSON schema."""
 
 
 # COMMAND ----------
 
-# MAGIC %md ## Helper functions — table discovery & metadata retrieval
+# MAGIC %md ## Constants
+
+# COMMAND ----------
+
+PENDING, PROCESSING, SUCCESS, FAILED, SKIPPED = "PENDING", "PROCESSING", "SUCCESS", "FAILED", "SKIPPED"
+ACTIVE_STATUSES = (PENDING, FAILED)  # what gets processed on a normal (non-force) run
+
+# COMMAND ----------
+
+# MAGIC %md ## `ai_analysis` schema, table creation, and in-place migration
+# MAGIC
+# MAGIC One row per (catalog, schema, table) — upserted, not appended. A table that already
+# MAGIC exists from before this rewrite (append-history, no status columns) is migrated in
+# MAGIC place: existing columns are checked via `information_schema.columns` first, then
+# MAGIC only the genuinely-missing ones are added via `ALTER TABLE ... ADD COLUMNS` (this
+# MAGIC warehouse's `ADD COLUMNS` does not support an `IF NOT EXISTS` clause — verified
+# MAGIC directly, not assumed — so the check has to happen in Python instead).
+
+# COMMAND ----------
+
+AI_ANALYSIS_SCHEMA = StructType(
+    [
+        StructField("catalog_name", StringType(), nullable=False),
+        StructField("schema_name", StringType(), nullable=False),
+        StructField("table_name", StringType(), nullable=False),
+        StructField("processing_status", StringType(), nullable=False),
+        StructField("created_time", TimestampType(), nullable=False),
+        StructField("last_processed_time", TimestampType(), nullable=True),
+        StructField("processed_by", StringType(), nullable=True),
+        StructField("ai_model_used", StringType(), nullable=True),
+        StructField("token_usage", LongType(), nullable=True),
+        StructField("retry_count", IntegerType(), nullable=False),
+        StructField("last_error_message", StringType(), nullable=True),
+        StructField("analysis_json", StringType(), nullable=True),
+        StructField("analysis_markdown", StringType(), nullable=True),
+        StructField("health_score", IntegerType(), nullable=True),
+        StructField("confidence_score", IntegerType(), nullable=True),
+        StructField("processing_time_ms", LongType(), nullable=True),
+        # Kept in lockstep with last_processed_time/created_time purely so the
+        # existing Streamlit app's `ORDER BY analysis_timestamp DESC` (which
+        # predates this incremental rewrite) keeps working unmodified — this
+        # migration is additive, not a breaking rename, on either side.
+        StructField("analysis_timestamp", TimestampType(), nullable=True),
+    ]
+)
+
+_KEY_COLUMNS = ["catalog_name", "schema_name", "table_name"]
+
+_SPARK_TYPE_TO_SQL = {
+    "StringType": "STRING",
+    "TimestampType": "TIMESTAMP",
+    "IntegerType": "INT",
+    "LongType": "BIGINT",
+}
+
+
+def _schema_to_ddl(schema: StructType) -> str:
+    """Render a StructType as a `col TYPE, col TYPE, ...` DDL fragment."""
+    return ", ".join(
+        f"{field.name} {_SPARK_TYPE_TO_SQL[type(field.dataType).__name__]}"
+        for field in schema.fields
+    )
+
+
+def ensure_ai_analysis_table(spark: SparkSession, metadata_catalog: str) -> str:
+    """Create `<metadata_catalog>.metadata.ai_analysis` if it doesn't exist yet, using
+    the current (status-tracked) schema — and if it already exists from before this
+    rewrite, add whatever tracking columns are missing in place.
+
+    `ALTER TABLE ... ADD COLUMNS IF NOT EXISTS` is NOT valid syntax on this warehouse
+    — verified directly (a real PARSE_SYNTAX_ERROR), not assumed. Re-adding a column
+    that already exists raises FIELD_ALREADY_EXISTS instead of being a no-op, so this
+    checks information_schema.columns first and only alters what's genuinely missing.
+    """
+    full_table_name = f"{metadata_catalog}.metadata.ai_analysis"
+    spark.sql(f"CREATE SCHEMA IF NOT EXISTS {metadata_catalog}.metadata")
+    spark.sql(
+        f"CREATE TABLE IF NOT EXISTS {full_table_name} ({_schema_to_ddl(AI_ANALYSIS_SCHEMA)}) "
+        f"USING DELTA"
+    )
+    existing_columns = {
+        row.column_name
+        for row in spark.sql(
+            f"SELECT column_name FROM {metadata_catalog}.information_schema.columns "
+            f"WHERE table_schema = 'metadata' AND table_name = 'ai_analysis'"
+        ).collect()
+    }
+    for field in AI_ANALYSIS_SCHEMA.fields:
+        if field.name in existing_columns:
+            continue
+        sql_type = _SPARK_TYPE_TO_SQL[type(field.dataType).__name__]
+        spark.sql(f"ALTER TABLE {full_table_name} ADD COLUMNS ({field.name} {sql_type})")
+    return full_table_name
+
+
+# COMMAND ----------
+
+# MAGIC %md ## Table selection & incremental status bootstrap
 
 # COMMAND ----------
 
 
-def discover_target_tables(
-    spark: SparkSession, metadata_catalog: str, target_table_name: str
-) -> list:
-    """Resolve the widget value to a concrete list of table_names to analyze.
+def resolve_schema_filter(schema_widget_value: str) -> Optional[list]:
+    """None means "no filter" (every layer); otherwise a list of schema names."""
+    if schema_widget_value.strip().upper() == "ALL":
+        return None
+    return [schema_widget_value.strip()]
 
-    `ALL` (case-insensitive) expands to every distinct table_name already present in
-    the metadata repository, sorted for a deterministic run order; anything else is
-    treated as one specific table name.
+
+def resolve_table_filter(target_table_name_widget_value: str) -> Optional[list]:
+    """None means "no filter" (every table in the schema scope); otherwise a list of
+    either bare table names or "schema.table" pairs (kept as raw strings — matched
+    against both forms by the caller, see build_scope_condition).
     """
-    if target_table_name.strip().upper() != "ALL":
-        return [target_table_name]
+    if target_table_name_widget_value.strip().upper() == "ALL":
+        return None
+    return [t.strip() for t in target_table_name_widget_value.split(",") if t.strip()]
 
-    full_table_name = f"{metadata_catalog}.metadata.table_metadata"
-    rows = spark.table(full_table_name).select("table_name").distinct().collect()
-    return sorted(row.table_name for row in rows)
+
+def build_scope_condition(schemas: Optional[list], tables: Optional[list]) -> str:
+    """A SQL WHERE fragment (no leading WHERE/AND) expressing the widget-selected
+    scope — reused identically to select the work list and to know what "Force
+    Reprocess"/"Reprocess Entire Layer" should reset to PENDING.
+    """
+    conditions = []
+    if schemas:
+        quoted = ", ".join(f"'{s}'" for s in schemas)
+        conditions.append(f"schema_name IN ({quoted})")
+    if tables:
+        table_only = [t for t in tables if "." not in t]
+        qualified = [t for t in tables if "." in t]
+        sub_conditions = []
+        if table_only:
+            quoted = ", ".join(f"'{t}'" for t in table_only)
+            sub_conditions.append(f"table_name IN ({quoted})")
+        for qname in qualified:
+            schema_part, table_part = qname.split(".", 1)
+            sub_conditions.append(
+                f"(schema_name = '{schema_part}' AND table_name = '{table_part}')"
+            )
+        if sub_conditions:
+            conditions.append("(" + " OR ".join(sub_conditions) + ")")
+    return " AND ".join(conditions) if conditions else "1=1"
+
+
+def bootstrap_pending_rows(
+    spark: SparkSession, metadata_catalog: str, ai_analysis_table: str
+) -> int:
+    """Insert a PENDING row for every (catalog, schema, table) present in
+    table_metadata that doesn't already have a row in ai_analysis — the "New Table ->
+    PENDING" step of the workflow. Returns how many new rows were added.
+    """
+    table_metadata_name = f"{metadata_catalog}.metadata.table_metadata"
+    new_tables = spark.sql(
+        f"""
+        SELECT m.catalog_name, m.schema_name, m.table_name
+        FROM {table_metadata_name} m
+        LEFT ANTI JOIN {ai_analysis_table} a
+          ON m.catalog_name = a.catalog_name
+         AND m.schema_name = a.schema_name
+         AND m.table_name = a.table_name
+        """
+    ).collect()
+
+    if not new_tables:
+        return 0
+
+    now_rows = [
+        Row(
+            catalog_name=r.catalog_name,
+            schema_name=r.schema_name,
+            table_name=r.table_name,
+            processing_status=PENDING,
+            created_time=None,  # stamped via current_timestamp() below
+            last_processed_time=None,
+            processed_by=None,
+            ai_model_used=None,
+            token_usage=None,
+            retry_count=0,
+            last_error_message=None,
+            analysis_json=None,
+            analysis_markdown=None,
+            health_score=None,
+            confidence_score=None,
+            processing_time_ms=None,
+            analysis_timestamp=None,  # stamped via current_timestamp() below
+        )
+        for r in new_tables
+    ]
+    new_df = (
+        spark.createDataFrame(now_rows, schema=AI_ANALYSIS_SCHEMA)
+        .withColumn("created_time", F.current_timestamp())
+        .withColumn("analysis_timestamp", F.current_timestamp())
+    )
+    new_df.write.format("delta").mode("append").saveAsTable(ai_analysis_table)
+    return len(new_tables)
+
+
+def apply_reprocess_reset(
+    spark: SparkSession, ai_analysis_table: str, scope_condition: str, force_reprocess: bool
+) -> int:
+    """Reset in-scope rows back to PENDING before selecting the work list.
+
+    Without --force, this resets nothing (FAILED rows are already always eligible —
+    see ACTIVE_STATUSES — so "reprocess failed tables" needs no separate reset step).
+    With --force, every in-scope row is reset regardless of current status, which is
+    "Force Reprocess" on its own, or "Reprocess Selected Tables"/"Reprocess Entire
+    Layer" depending on how narrow or broad the scope_condition is.
+    """
+    if not force_reprocess:
+        return 0
+    result = spark.sql(
+        f"UPDATE {ai_analysis_table} SET processing_status = '{PENDING}' "
+        f"WHERE {scope_condition}"
+    )
+    # UPDATE's returned DataFrame (Delta) has a num_affected_rows column in recent
+    # DBR versions; fall back to 0 (informational only) if that shape isn't present.
+    try:
+        return result.collect()[0]["num_affected_rows"]
+    except Exception:
+        return 0
+
+
+def get_work_list(spark: SparkSession, ai_analysis_table: str, scope_condition: str) -> list:
+    """The tables actually eligible for processing THIS run: in scope AND
+    PENDING/FAILED — never SUCCESS, which is the entire incremental-processing point.
+    """
+    statuses = ", ".join(f"'{s}'" for s in ACTIVE_STATUSES)
+    rows = spark.sql(
+        f"""
+        SELECT catalog_name, schema_name, table_name, retry_count
+        FROM {ai_analysis_table}
+        WHERE {scope_condition} AND processing_status IN ({statuses})
+        ORDER BY schema_name, table_name
+        """
+    ).collect()
+    return [r.asDict() for r in rows]
+
+
+# COMMAND ----------
+
+# MAGIC %md ## Metadata retrieval, prompting, and AI response validation
+
+# COMMAND ----------
 
 
 def fetch_table_metadata(
-    spark: SparkSession, metadata_catalog: str, target_table_name: str
+    spark: SparkSession, metadata_catalog: str, schema_name: str, table_name: str
 ) -> dict:
-    """Read the single metadata row for `target_table_name` from the metadata
-    repository and return it as a plain (JSON-serializable-ready) nested dict.
+    """Read the single metadata row for (schema_name, table_name) from the metadata
+    repository — keyed by the full pair, not table_name alone (see module docstring:
+    Bronze and Silver can both have a table literally named the same thing).
     """
     full_table_name = f"{metadata_catalog}.metadata.table_metadata"
     matches = (
         spark.table(full_table_name)
-        .filter(F.col("table_name") == target_table_name)
+        .filter((F.col("schema_name") == schema_name) & (F.col("table_name") == table_name))
         .collect()
     )
-
     if not matches:
-        raise MetadataNotFoundError(
-            f"No metadata found for table_name='{target_table_name}' in '{full_table_name}'. "
-            f"Has 02_metadata_collector.py been run for this table?"
+        raise ValueError(
+            f"No metadata found for '{schema_name}.{table_name}' in '{full_table_name}'. "
+            f"Has 02_metadata_collector.py been run for this layer?"
         )
-    if len(matches) > 1:
-        logger.warning(
-            "Found %d metadata rows for table_name='%s'; using the first.",
-            len(matches),
-            target_table_name,
-        )
-
     return matches[0].asDict(recursive=True)
 
 
@@ -175,12 +410,6 @@ Metadata:
 """
 
 
-# COMMAND ----------
-
-# MAGIC %md ## Helper functions — AI response validation
-
-# COMMAND ----------
-
 _CODE_FENCE_PATTERN = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL)
 
 
@@ -217,15 +446,6 @@ def _coerce_score(value) -> Optional[int]:
     except (TypeError, ValueError):
         logger.warning("Could not coerce score value %r to int; storing NULL.", value)
         return None
-
-
-# COMMAND ----------
-
-# MAGIC %md ## Helper functions — markdown rendering
-# MAGIC
-# MAGIC Pure formatting: turns the already-validated JSON into Markdown. No second AI call.
-
-# COMMAND ----------
 
 
 def render_markdown(table_name: str, analysis: dict) -> str:
@@ -275,168 +495,123 @@ def render_markdown(table_name: str, analysis: dict) -> str:
 
 # COMMAND ----------
 
-# MAGIC %md ## Persistence — `ai_analysis` schema & writes
+# MAGIC %md ## Per-table orchestration — the PENDING/PROCESSING/SUCCESS/FAILED workflow
 
 # COMMAND ----------
 
-AI_ANALYSIS_SCHEMA = StructType(
-    [
-        StructField("catalog_name", StringType(), nullable=False),
-        StructField("schema_name", StringType(), nullable=True),
-        StructField("table_name", StringType(), nullable=False),
-        StructField("analysis_timestamp", TimestampType(), nullable=False),
-        StructField("model_name", StringType(), nullable=False),
-        StructField("analysis_json", StringType(), nullable=True),
-        StructField("analysis_markdown", StringType(), nullable=True),
-        StructField("health_score", IntegerType(), nullable=True),
-        StructField("confidence_score", IntegerType(), nullable=True),
-        StructField("processing_time_ms", LongType(), nullable=False),
-        StructField("status", StringType(), nullable=False),
-        StructField("error_message", StringType(), nullable=True),
-    ]
-)
 
-
-_SPARK_TYPE_TO_SQL = {
-    "StringType": "STRING",
-    "TimestampType": "TIMESTAMP",
-    "IntegerType": "INT",
-    "LongType": "BIGINT",
-}
-
-
-def _schema_to_ddl(schema: StructType) -> str:
-    """Render a StructType as a `col TYPE, col TYPE, ...` DDL fragment."""
-    return ", ".join(
-        f"{field.name} {_SPARK_TYPE_TO_SQL[type(field.dataType).__name__]}"
-        for field in schema.fields
-    )
-
-
-def ensure_ai_analysis_table(spark: SparkSession, metadata_catalog: str) -> str:
-    """Create `<metadata_catalog>.metadata.ai_analysis` if it doesn't already exist.
-
-    Uses `CREATE TABLE IF NOT EXISTS` DDL directly rather than a tableExists() check
-    plus a conditional write — atomic, and avoids any ambiguity in how tableExists()
-    resolves a fully-qualified three-level table name across Spark versions.
+def get_processed_by(spark: SparkSession) -> str:
+    """The real identity this notebook is running as — `current_user()` reflects
+    whoever/whatever the job or interactive session authenticates as, not a
+    fabricated value.
     """
-    full_table_name = f"{metadata_catalog}.metadata.ai_analysis"
-    spark.sql(f"CREATE SCHEMA IF NOT EXISTS {metadata_catalog}.metadata")
+    return spark.sql("SELECT current_user() AS user").collect()[0]["user"]
+
+
+def mark_processing(spark: SparkSession, ai_analysis_table: str, key: dict) -> None:
     spark.sql(
-        f"CREATE TABLE IF NOT EXISTS {full_table_name} ({_schema_to_ddl(AI_ANALYSIS_SCHEMA)}) "
-        f"USING DELTA"
+        f"""
+        UPDATE {ai_analysis_table}
+        SET processing_status = '{PROCESSING}', last_processed_time = current_timestamp()
+        WHERE catalog_name = '{key["catalog_name"]}' AND schema_name = '{key["schema_name"]}'
+          AND table_name = '{key["table_name"]}'
+        """
     )
-    return full_table_name
 
 
-def build_analysis_record(
-    catalog_name: Optional[str],
-    schema_name: Optional[str],
-    table_name: str,
-    model_name: str,
-    processing_time_ms: int,
-    status: str,
-    analysis_json_text: Optional[str] = None,
-    analysis_markdown: Optional[str] = None,
-    health_score: Optional[int] = None,
-    confidence_score: Optional[int] = None,
-    error_message: Optional[str] = None,
-) -> dict:
-    """Build one ai_analysis row, for either a SUCCESS or a FAILED table."""
-    return {
-        "catalog_name": catalog_name,
-        "schema_name": schema_name,
-        "table_name": table_name,
-        "analysis_timestamp": datetime.utcnow(),
-        "model_name": model_name,
-        "analysis_json": analysis_json_text,
-        "analysis_markdown": analysis_markdown,
-        "health_score": health_score,
-        "confidence_score": confidence_score,
-        "processing_time_ms": processing_time_ms,
-        "status": status,
-        "error_message": error_message,
-    }
-
-
-def persist_analysis_record(spark: SparkSession, full_table_name: str, record: dict) -> None:
-    """Append one analysis record. Called once per table, immediately after that
-    table finishes processing — so a crash partway through an ALL-mode run loses at
-    most the in-flight table, not every table already analyzed.
-    """
-    spark.createDataFrame([Row(**record)], schema=AI_ANALYSIS_SCHEMA).write.format(
-        "delta"
-    ).mode("append").saveAsTable(full_table_name)
-
-
-# COMMAND ----------
-
-# MAGIC %md ## Per-table orchestration
-# MAGIC
-# MAGIC The one reusable pipeline used for both a single table and every table in ALL
-# MAGIC mode — never stops on failure, always returns a record (SUCCESS or FAILED).
-
-# COMMAND ----------
-
-
-def analyze_one_table(
-    spark: SparkSession, metadata_catalog: str, target_table_name: str
-) -> dict:
+def analyze_one_table(spark: SparkSession, metadata_catalog: str, key: dict) -> dict:
     """Run metadata fetch -> prompt -> Gemini -> validate -> markdown for one table.
 
-    Always returns a record dict ready for persist_analysis_record — never raises;
-    any failure along the way is captured as a status='FAILED' record instead.
+    Always returns a result dict describing the outcome — never raises; any failure
+    along the way is captured as a FAILED result instead, so the caller's loop always
+    continues to the next table.
     """
     start = time.perf_counter()
-    catalog_name = metadata_catalog
-    schema_name = None
+    schema_name, table_name = key["schema_name"], key["table_name"]
 
     try:
-        metadata = fetch_table_metadata(spark, metadata_catalog, target_table_name)
-        catalog_name = metadata.get("catalog_name", metadata_catalog)
-        schema_name = metadata.get("schema_name")
-
+        metadata = fetch_table_metadata(spark, metadata_catalog, schema_name, table_name)
         prompt = build_prompt(metadata)
         raw_response = generate_content(prompt)
         analysis = parse_ai_json_response(raw_response)
-        markdown = render_markdown(target_table_name, analysis)
-
+        markdown = render_markdown(table_name, analysis)
         processing_time_ms = int((time.perf_counter() - start) * 1000)
-        logger.info("Analyzed '%s' successfully in %d ms.", target_table_name, processing_time_ms)
-
-        return build_analysis_record(
-            catalog_name=catalog_name,
-            schema_name=schema_name,
-            table_name=target_table_name,
-            model_name=DEFAULT_MODEL,
-            processing_time_ms=processing_time_ms,
-            status="SUCCESS",
-            analysis_json_text=json.dumps(analysis),
-            analysis_markdown=markdown,
-            health_score=_coerce_score(analysis.get("health_score")),
-            confidence_score=_coerce_score(analysis.get("confidence_score")),
+        logger.info(
+            "Analyzed '%s.%s' successfully in %d ms.", schema_name, table_name, processing_time_ms
         )
-
+        return {
+            "status": SUCCESS,
+            "analysis_json": json.dumps(analysis),
+            "analysis_markdown": markdown,
+            "health_score": _coerce_score(analysis.get("health_score")),
+            "confidence_score": _coerce_score(analysis.get("confidence_score")),
+            "processing_time_ms": processing_time_ms,
+            "error_message": None,
+        }
     except Exception as exc:
         processing_time_ms = int((time.perf_counter() - start) * 1000)
-        logger.error("Analysis failed for '%s': %s", target_table_name, exc)
-        return build_analysis_record(
-            catalog_name=catalog_name,
-            schema_name=schema_name,
-            table_name=target_table_name,
-            model_name=DEFAULT_MODEL,
-            processing_time_ms=processing_time_ms,
-            status="FAILED",
-            error_message=str(exc),
-        )
+        logger.error("Analysis failed for '%s.%s': %s", schema_name, table_name, exc)
+        return {
+            "status": FAILED,
+            "analysis_json": None,
+            "analysis_markdown": None,
+            "health_score": None,
+            "confidence_score": None,
+            "processing_time_ms": processing_time_ms,
+            "error_message": str(exc),
+        }
+
+
+def persist_result(
+    spark: SparkSession, ai_analysis_table: str, key: dict, result: dict, processed_by: str
+) -> None:
+    """Update the one row for this table in place — an UPDATE, not an append/MERGE,
+    since bootstrap_pending_rows() already guarantees the row exists before this is
+    ever called (either from the original bootstrap or a prior run).
+    """
+    retry_count_expr = (
+        "retry_count" if result["status"] == SUCCESS else "retry_count + 1"
+    )
+    set_clauses = [
+        f"processing_status = '{result['status']}'",
+        "last_processed_time = current_timestamp()",
+        "analysis_timestamp = current_timestamp()",
+        f"processed_by = '{processed_by}'",
+        f"ai_model_used = '{DEFAULT_MODEL}'",
+        f"retry_count = {retry_count_expr}",
+        f"analysis_json = {_sql_literal(result['analysis_json'])}",
+        f"analysis_markdown = {_sql_literal(result['analysis_markdown'])}",
+        f"health_score = {_sql_literal(result['health_score'])}",
+        f"confidence_score = {_sql_literal(result['confidence_score'])}",
+        f"processing_time_ms = {_sql_literal(result['processing_time_ms'])}",
+        f"last_error_message = {_sql_literal(result['error_message'])}",
+    ]
+    spark.sql(
+        f"""
+        UPDATE {ai_analysis_table}
+        SET {", ".join(set_clauses)}
+        WHERE catalog_name = '{key["catalog_name"]}' AND schema_name = '{key["schema_name"]}'
+          AND table_name = '{key["table_name"]}'
+        """
+    )
+
+
+def _sql_literal(value) -> str:
+    """A safe SQL literal for a value already produced by this pipeline (never raw
+    user text) — NULL, a quoted/escaped string, or a bare number.
+    """
+    if value is None:
+        return "NULL"
+    if isinstance(value, (int, float)):
+        return str(value)
+    return "'" + str(value).replace("'", "''") + "'"
 
 
 # COMMAND ----------
 
 # MAGIC %md ## HTML dashboard rendering
 # MAGIC
-# MAGIC Pure presentation, isolated from the processing/persistence logic above — takes the
-# MAGIC collected records and renders one self-contained HTML string for `displayHTML`.
+# MAGIC Pure presentation, isolated from the processing/persistence logic above.
 
 # COMMAND ----------
 
@@ -448,7 +623,8 @@ _HEALTH_BUCKETS = [
 
 
 def _status_badge(status: str) -> str:
-    color = "#16a34a" if status == "SUCCESS" else "#dc2626"
+    colors = {SUCCESS: "#16a34a", FAILED: "#dc2626", SKIPPED: "#6b7280"}
+    color = colors.get(status, "#6b7280")
     return (
         f'<span style="background:{color};color:#fff;padding:3px 10px;'
         f'border-radius:12px;font-size:12px;font-weight:600;">{status}</span>'
@@ -479,15 +655,17 @@ def _health_distribution_html(results: list) -> str:
     return "".join(rows)
 
 
-def render_html_dashboard(results: list, total_elapsed_seconds: float) -> str:
+def render_html_dashboard(
+    results: list, skipped_count: int, new_pending_count: int, total_elapsed_seconds: float
+) -> str:
     """Build the enterprise-style HTML summary dashboard for displayHTML()."""
     total = len(results)
-    succeeded = sum(1 for r in results if r["status"] == "SUCCESS")
+    succeeded = sum(1 for r in results if r["status"] == SUCCESS)
     failed = total - succeeded
 
     table_rows = "".join(
         f"<tr>"
-        f"<td>{r['table_name']}</td>"
+        f"<td>{r['schema_name']}.{r['table_name']}</td>"
         f"<td>{_status_badge(r['status'])}</td>"
         f"<td>{r['health_score'] if r['health_score'] is not None else '—'}</td>"
         f"<td>{r['confidence_score'] if r['confidence_score'] is not None else '—'}</td>"
@@ -502,13 +680,13 @@ def render_html_dashboard(results: list, total_elapsed_seconds: float) -> str:
             color:#111827;max-width:1000px;">
   <h2 style="margin-bottom:4px;">AI Metadata Analyzer — Run Summary</h2>
   <p style="color:#6b7280;margin-top:0;">
-    Metadata Table &rarr; Prompt Generation &rarr; Gemini &rarr; AI Analysis
+    Incremental run: only PENDING/FAILED tables were sent to Gemini this time.
   </p>
 
   <div style="display:flex;gap:16px;margin:20px 0;flex-wrap:wrap;">
     <div style="background:#f3f4f6;border-radius:10px;padding:16px 24px;min-width:140px;">
       <div style="font-size:28px;font-weight:700;">{total}</div>
-      <div style="color:#6b7280;font-size:13px;">Total Tables</div>
+      <div style="color:#6b7280;font-size:13px;">Processed This Run</div>
     </div>
     <div style="background:#ecfdf5;border-radius:10px;padding:16px 24px;min-width:140px;">
       <div style="font-size:28px;font-weight:700;color:#16a34a;">{succeeded}</div>
@@ -518,11 +696,20 @@ def render_html_dashboard(results: list, total_elapsed_seconds: float) -> str:
       <div style="font-size:28px;font-weight:700;color:#dc2626;">{failed}</div>
       <div style="color:#6b7280;font-size:13px;">Failed</div>
     </div>
+    <div style="background:#f3f4f6;border-radius:10px;padding:16px 24px;min-width:140px;">
+      <div style="font-size:28px;font-weight:700;color:#6b7280;">{skipped_count}</div>
+      <div style="color:#6b7280;font-size:13px;">Skipped (already SUCCESS)</div>
+    </div>
     <div style="background:#eff6ff;border-radius:10px;padding:16px 24px;min-width:140px;">
       <div style="font-size:28px;font-weight:700;color:#2563eb;">{total_elapsed_seconds:.1f}s</div>
       <div style="color:#6b7280;font-size:13px;">Execution Time</div>
     </div>
   </div>
+
+  <p style="color:#6b7280;font-size:13px;">
+    {new_pending_count} newly-discovered table(s) added as PENDING this run
+    (processed immediately if in scope, otherwise ready for the next run).
+  </p>
 
   <h3 style="margin-bottom:8px;">Health Score Distribution</h3>
   <div style="max-width:500px;margin-bottom:24px;">
@@ -558,30 +745,52 @@ def render_html_dashboard(results: list, total_elapsed_seconds: float) -> str:
 
 def main() -> None:
     metadata_catalog = dbutils.widgets.get("metadata_catalog")
+    schema_widget_value = dbutils.widgets.get("schema")
     target_table_name = dbutils.widgets.get("target_table_name")
+    force_reprocess = dbutils.widgets.get("force_reprocess").strip().lower() == "yes"
 
     logger.info(
-        "Starting AI metadata analysis | catalog=%s target=%s",
+        "Starting AI metadata analysis | catalog=%s schema=%s target=%s force_reprocess=%s",
         metadata_catalog,
+        schema_widget_value,
         target_table_name,
+        force_reprocess,
     )
 
     start_time = time.perf_counter()
 
     try:
         ai_analysis_table = ensure_ai_analysis_table(spark, metadata_catalog)
-        target_tables = discover_target_tables(spark, metadata_catalog, target_table_name)
+        new_pending_count = bootstrap_pending_rows(spark, metadata_catalog, ai_analysis_table)
 
+        schemas = resolve_schema_filter(schema_widget_value)
+        tables = resolve_table_filter(target_table_name)
+        scope_condition = build_scope_condition(schemas, tables)
+
+        reset_count = apply_reprocess_reset(
+            spark, ai_analysis_table, scope_condition, force_reprocess
+        )
+        if force_reprocess:
+            logger.info("Force reprocess: reset %d row(s) to PENDING.", reset_count)
+
+        work_list = get_work_list(spark, ai_analysis_table, scope_condition)
+        in_scope_total = spark.sql(
+            f"SELECT COUNT(*) AS n FROM {ai_analysis_table} WHERE {scope_condition}"
+        ).collect()[0]["n"]
+        skipped_count = in_scope_total - len(work_list)
+
+        processed_by = get_processed_by(spark)
         results = []
-        for table_name in target_tables:
-            # analyze_one_table never raises — a per-table failure becomes a FAILED
-            # record instead, so the loop always continues to the next table.
-            record = analyze_one_table(spark, metadata_catalog, table_name)
-            persist_analysis_record(spark, ai_analysis_table, record)
-            results.append(record)
+        for key in work_list:
+            mark_processing(spark, ai_analysis_table, key)
+            outcome = analyze_one_table(spark, metadata_catalog, key)
+            persist_result(spark, ai_analysis_table, key, outcome, processed_by)
+            results.append({**key, **outcome})
 
         elapsed_seconds = time.perf_counter() - start_time
-        displayHTML(render_html_dashboard(results, elapsed_seconds))
+        displayHTML(
+            render_html_dashboard(results, skipped_count, new_pending_count, elapsed_seconds)
+        )
 
     except Exception:
         logger.exception("AI metadata analysis run failed (infrastructure-level, not per-table).")
