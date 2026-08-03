@@ -21,12 +21,17 @@ import streamlit as st
 from components.charts import render_bar_chart, render_line_chart, render_pie_chart
 from components.filters import get_filters
 from components.header import render_page_header
-from components.kpi_cards import render_kpi_row
+from components.kpi_cards import render_kpi_row, render_stat_badges
 from components.shell import render_app_shell
 from components.tables import render_dataframe, render_empty_state
 from utils.databricks import DatabricksConnectionError, DatabricksQueryError, run_query
 from utils.gemini import GeminiClientError, GeminiConfigurationError, generate_executive_summary
-from utils.helpers import format_currency, format_number
+from utils.helpers import (
+    format_currency,
+    format_currency_compact,
+    format_number,
+    format_number_compact,
+)
 from utils.queries import (
     sql_customer_growth,
     sql_kpi_summary_live,
@@ -96,13 +101,43 @@ else:
     )
     render_kpi_row(
         [
-            {"label": "Total Revenue", "value": format_currency(row.get("total_revenue"))},
-            {"label": "Total Orders", "value": format_number(row.get("total_orders"))},
-            {"label": "Total Customers", "value": format_number(row.get("total_customers"))},
-            {"label": "Avg Order Value", "value": format_currency(row.get("avg_order_value"))},
+            {
+                "label": "Total Revenue",
+                "value": format_currency_compact(row.get("total_revenue")),
+                "help": format_currency(row.get("total_revenue")),
+                "icon": "money",
+                "accent": "success",
+            },
+            {
+                "label": "Total Orders",
+                "value": format_number_compact(row.get("total_orders")),
+                "help": format_number(row.get("total_orders")),
+                "icon": "orders",
+                "accent": "info",
+            },
+            {
+                "label": "Total Customers",
+                "value": format_number_compact(row.get("total_customers")),
+                "help": format_number(row.get("total_customers")),
+                "icon": "customers",
+                "accent": "ai",
+            },
+            {
+                "label": "Avg Order Value",
+                "value": format_currency_compact(row.get("avg_order_value")),
+                "help": format_currency(row.get("avg_order_value")),
+                "icon": "trending_up",
+                "accent": "warning",
+            },
         ]
     )
-    st.caption(f"Top territory: {top_territory_name} · Top product: {top_product_name}")
+    st.markdown('<div style="height:14px;"></div>', unsafe_allow_html=True)
+    render_stat_badges(
+        [
+            {"icon": "🌍", "label": "Top Territory", "value": top_territory_name},
+            {"icon": "🏆", "label": "Top Product", "value": top_product_name},
+        ]
+    )
 
 st.divider()
 st.caption(

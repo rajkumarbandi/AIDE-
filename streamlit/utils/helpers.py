@@ -30,6 +30,52 @@ def format_number(value: Optional[float]) -> str:
         return "—"
 
 
+def _compact_suffix(value: float) -> tuple:
+    """(scaled_value, suffix) for a compact K/M/B representation — e.g.
+    2_758_302.34 -> (2.758302, "M"). Values under 1,000 get no suffix.
+    """
+    abs_value = abs(value)
+    if abs_value >= 1_000_000_000:
+        return value / 1_000_000_000, "B"
+    if abs_value >= 1_000_000:
+        return value / 1_000_000, "M"
+    if abs_value >= 1_000:
+        return value / 1_000, "K"
+    return value, ""
+
+
+def format_currency_compact(value: Optional[float], decimals: int = 2) -> str:
+    """2758302.34 -> '$2.76M'; 324.5 -> '$324.50'. None/NaN-safe. Pair with
+    format_currency(value) as a tooltip for full precision — used by the
+    Executive Dashboard's KPI cards, where a full-precision value like
+    "$2,758,302.34" was wide enough to clip in a narrow card.
+    """
+    if value is None:
+        return "—"
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    scaled, suffix = _compact_suffix(value)
+    if not suffix:
+        return f"${scaled:,.2f}"
+    return f"${scaled:,.{decimals}f}{suffix}"
+
+
+def format_number_compact(value: Optional[float], decimals: int = 1) -> str:
+    """31465 -> '31.5K'; 324560.0 -> '324.6K'; 523 -> '523'. None/NaN-safe."""
+    if value is None:
+        return "—"
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    scaled, suffix = _compact_suffix(value)
+    if not suffix:
+        return f"{scaled:,.0f}"
+    return f"{scaled:,.{decimals}f}{suffix}"
+
+
 def format_pct(value: Optional[float], decimals: int = 1) -> str:
     """0.1234 -> '12.3%'. Assumes `value` is a fraction (0-1), not already *100."""
     if value is None:

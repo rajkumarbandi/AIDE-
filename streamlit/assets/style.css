@@ -199,10 +199,129 @@ html, body, [class*="css"] {
 hr {
   border: none;
   height: 1px;
+  margin: 20px 0;
   background: linear-gradient(90deg, var(--aide-border), transparent);
 }
 
 /* Tabs — slightly bolder active-tab indicator using the accent color. */
 [data-testid="stTabs"] [aria-selected="true"] {
   color: var(--aide-accent) !important;
+}
+
+/* Executive Dashboard headline KPI cards (components/kpi_cards.py) — replaces
+   a plain st.metric() grid, whose fixed-size value text clipped a long
+   formatted currency string ("$2,758,...") in a 4-column row. Uses only the
+   existing accent color variables above (green/blue/purple/amber) — no new
+   colors. Sits inside an st.columns() cell, so width is already responsive;
+   this only needs to fill that cell and stay a consistent height. */
+.aide-kpi-card {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 108px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 16px 18px;
+  border-radius: var(--aide-radius);
+  border: 1px solid var(--aide-border);
+  border-left: 4px solid var(--aide-accent);
+  background: linear-gradient(135deg, var(--aide-surface) 0%, var(--aide-accent-soft) 180%);
+  box-shadow: var(--aide-shadow-sm);
+  transition: transform var(--aide-transition), box-shadow var(--aide-transition);
+}
+
+.aide-kpi-card:hover {
+  box-shadow: var(--aide-shadow-md);
+  transform: translateY(-1px);
+}
+
+/* Accent variants — only the left border + gradient tint change per KPI,
+   keeping the same card shape/shadow/spacing for a consistent, non-flashy look. */
+.aide-kpi-card.aide-kpi-success { border-left-color: var(--aide-success); background: linear-gradient(135deg, var(--aide-surface) 0%, var(--aide-success-soft) 180%); }
+.aide-kpi-card.aide-kpi-info { border-left-color: var(--aide-accent); background: linear-gradient(135deg, var(--aide-surface) 0%, var(--aide-accent-soft) 180%); }
+.aide-kpi-card.aide-kpi-ai { border-left-color: var(--aide-ai); background: linear-gradient(135deg, var(--aide-surface) 0%, var(--aide-ai-soft) 180%); }
+.aide-kpi-card.aide-kpi-warning { border-left-color: var(--aide-warning); background: linear-gradient(135deg, var(--aide-surface) 0%, var(--aide-warning-soft) 180%); }
+
+.aide-kpi-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.aide-kpi-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  border-radius: 8px;
+  background: var(--aide-accent-soft);
+  color: var(--aide-accent);
+}
+.aide-kpi-card.aide-kpi-success .aide-kpi-icon { background: var(--aide-success-soft); color: var(--aide-success); }
+.aide-kpi-card.aide-kpi-info .aide-kpi-icon { background: var(--aide-accent-soft); color: var(--aide-accent); }
+.aide-kpi-card.aide-kpi-ai .aide-kpi-icon { background: var(--aide-ai-soft); color: var(--aide-ai); }
+.aide-kpi-card.aide-kpi-warning .aide-kpi-icon { background: var(--aide-warning-soft); color: var(--aide-warning); }
+
+.aide-kpi-icon svg { width: 16px; height: 16px; }
+
+.aide-kpi-label {
+  color: var(--aide-text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+/* clamp() shrinks the value on narrower cards instead of clipping/truncating —
+   combined with compact "$2.76M"-style formatting, this should never need to
+   wrap or cut off; full precision is still available via the title tooltip. */
+.aide-kpi-value {
+  font-size: clamp(1.15rem, 2.2vw, 1.7rem);
+  font-weight: 700;
+  color: var(--aide-text);
+  line-height: 1.15;
+  white-space: nowrap;
+}
+
+/* Small secondary-stat cards (Top Territory, Top Product). Long values (a
+   real product name can be long) wrap onto a second line rather than being
+   cut off with an ellipsis. */
+.aide-stat-badge {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 12px 16px;
+  border-radius: var(--aide-radius);
+  border: 1px solid var(--aide-border);
+  background: var(--aide-surface);
+  box-shadow: var(--aide-shadow-sm);
+}
+
+.aide-stat-badge-icon {
+  font-size: 20px;
+  flex-shrink: 0;
+}
+
+.aide-stat-badge-label {
+  color: var(--aide-text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 2px;
+}
+
+.aide-stat-badge-value {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--aide-text);
+  white-space: normal;
+  word-break: break-word;
 }
