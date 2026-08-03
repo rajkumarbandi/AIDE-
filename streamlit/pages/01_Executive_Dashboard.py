@@ -51,6 +51,8 @@ render_page_header(
     description="Headline KPIs, trends, and an AI-generated summary of the "
     "currently filtered sales data.",
     breadcrumb=["Home", "Executive Dashboard"],
+    icon="🏠",
+    accent="success",
 )
 
 filters = get_filters()

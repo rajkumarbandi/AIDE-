@@ -2,13 +2,21 @@
 Bronze, Silver, and Gold, with a full detail view (columns, AI explanation,
 sample SQL, related tables, data quality metrics) on selection.
 
-Honesty note on scope: 02_metadata_collector.py currently only AI-analyzes
-the Bronze layer, so Bronze rows carry real, rich collected metadata (row
-count, column profile, PK candidates) while Silver/Gold rows are built live
-from information_schema — real, live metadata, just not the same
-AI-generated business analysis Bronze has yet. Row count for Silver/Gold is
-fetched on demand for the selected table only, never eagerly for every row
-in the listing (see sql_row_count's docstring).
+Honesty note on scope: 02_metadata_collector.py now AI-collects metadata for
+all three medallion layers (previously Bronze-only), so most tables carry
+real, rich collected metadata (row count, column profile, PK candidates). A
+table can still lack that metadata if the collector simply hasn't run against
+its layer yet (e.g. a table added after the last run) — those rows are built
+live from information_schema instead: real, live metadata, just not the same
+AI-generated business analysis. _load_unified_catalog() below treats
+table_metadata as the source of truth and only falls back to
+information_schema for tables it doesn't already cover — a table must never
+appear from both sources at once (a real, previously reported bug: every
+AI-analyzed Silver/Gold table showed up twice, once from each source, because
+this fallback used to run unconditionally for every Silver/Gold table
+regardless of whether table_metadata already had it). Row count for a
+not-yet-analyzed table is fetched on demand for the selected table only,
+never eagerly for every row in the listing (see sql_row_count's docstring).
 
 "Tags" and "Owner" are not fields that exist anywhere in metadata.table_metadata
 or metadata.ai_analysis — there is no real data source for them yet, so
@@ -17,14 +25,23 @@ System" is shown as "AdventureWorks" because that's a true fact about this
 specific warehouse, not an invented value.
 """
 
+import html
+
 import pandas as pd
 import streamlit as st
 
 from components.filters import get_filters
 from components.header import render_page_header
-from components.metric_cards import layer_badge, processing_status_badge, render_metric_grid
+from components.metric_cards import (
+    layer_badge,
+    priority_badge,
+    processing_status_badge,
+    render_metric_grid,
+    reviewer_badge,
+    status_badge,
+)
 from components.shell import render_app_shell
-from components.tables import render_dataframe, render_empty_state
+from components.tables import render_dataframe, render_empty_state, render_html_table
 from utils.config import DEFAULT_GOLD_SCHEMA, DEFAULT_METADATA_SCHEMA, DEFAULT_SILVER_SCHEMA
 from utils.databricks import DatabricksConnectionError, DatabricksQueryError, run_query
 from utils.gemini import GeminiClientError, GeminiConfigurationError, generate_content
@@ -51,6 +68,8 @@ render_page_header(
     description="Search, filter, and explore every discovered table's metadata and "
     "AI-generated business analysis across Bronze, Silver, and Gold.",
     breadcrumb=["Home", "AI Data Catalog"],
+    icon="📚",
+    accent="info",
 )
 
 filters = get_filters()
@@ -67,19 +86,28 @@ def _safe_query(sql: str):
 
 @st.cache_data(ttl=300, show_spinner=False)
 def _load_unified_catalog(catalog: str) -> pd.DataFrame:
-    """Bronze rows from the AI-collected metadata.table_metadata (real, rich
-    data); Silver/Gold rows built live from information_schema (real, live,
-    just not yet AI-analyzed — see module docstring).
+    """metadata.table_metadata is the source of truth (now AI-collected across
+    Bronze, Silver, and Gold — see module docstring); information_schema is
+    only a fallback for a table that source doesn't cover yet (not yet
+    scanned by 02_metadata_collector.py). A table is added from exactly one of
+    the two sources, never both — `covered` tracks every (layer, table_name)
+    already supplied by table_metadata so the information_schema loop below
+    can skip it, which is the fix for the real "every table appears twice"
+    bug this function previously had (see module docstring).
     """
     rows = []
+    covered = set()
 
-    bronze_df = _safe_query(sql_table_metadata(catalog=catalog))
-    if bronze_df is not None:
-        for _, r in bronze_df.iterrows():
+    metadata_df = _safe_query(sql_table_metadata(catalog=catalog))
+    if metadata_df is not None:
+        for _, r in metadata_df.iterrows():
+            layer = r.get("schema_name") or "bronze"
+            table_name = r["table_name"]
+            covered.add((layer, table_name))
             rows.append(
                 {
-                    "layer": r.get("schema_name", "bronze"),
-                    "table_name": r["table_name"],
+                    "layer": layer,
+                    "table_name": table_name,
                     "column_count": r.get("column_count"),
                     "row_count": r.get("row_count"),
                     "primary_key_candidates": r.get("primary_key_candidates"),
@@ -99,11 +127,14 @@ def _load_unified_catalog(catalog: str) -> pd.DataFrame:
             else {}
         )
         for _, r in tables_df.iterrows():
+            table_name = r["table_name"]
+            if (layer, table_name) in covered:
+                continue
             rows.append(
                 {
                     "layer": layer,
-                    "table_name": r["table_name"],
-                    "column_count": counts_by_table.get(r["table_name"]),
+                    "table_name": table_name,
+                    "column_count": counts_by_table.get(table_name),
                     "row_count": None,
                     "primary_key_candidates": None,
                     "columns": None,
@@ -332,9 +363,17 @@ def _render_comments_tab(table_name: str) -> None:
         st.caption(f"{len(comments_df)} comment(s) for this table")
         for _, row in comments_df.iterrows():
             with st.container(border=True):
+                # reason/status/priority are all from fixed, controlled-vocabulary
+                # dropdowns (never free text), and reviewer_badge()/status_badge()/
+                # priority_badge() escape their own label internally — safe to mix
+                # with unsafe_allow_html=True. comment_text below is genuine free
+                # text, so it stays on its own plain st.markdown call (no
+                # unsafe_allow_html), same as before.
                 st.markdown(
-                    f"**{row['reason']}** · {row['status']} · Priority: {row['priority']} · "
-                    f"{row['author']} · {row['created_at']}"
+                    f"**{html.escape(str(row['reason']))}** · {status_badge(row['status'])} "
+                    f"{priority_badge(row['priority'])} {reviewer_badge(str(row['author']))} · "
+                    f"{row['created_at']}",
+                    unsafe_allow_html=True,
                 )
                 st.markdown(row["comment_text"])
                 if row.get("affected_column"):
@@ -371,7 +410,22 @@ else:
 
     st.caption(f"{len(filtered_df)} of {len(catalog_df)} tables across Bronze, Silver, and Gold")
     display_columns = ["layer", "table_name", "column_count", "row_count", "has_ai_analysis"]
-    render_dataframe(filtered_df[display_columns] if not filtered_df.empty else filtered_df)
+    render_html_table(
+        filtered_df[display_columns] if not filtered_df.empty else filtered_df,
+        cell_renderers={
+            "layer": lambda v: layer_badge(str(v)),
+            "table_name": lambda v: f"<code>{html.escape(str(v))}</code>",
+            "column_count": lambda v: "—" if pd.isna(v) else format_number(v),
+            "row_count": lambda v: "—" if pd.isna(v) else format_number(v),
+            "has_ai_analysis": lambda v: "✅ Analyzed" if v else "⏳ Pending",
+        },
+        column_labels={
+            "table_name": "Table",
+            "column_count": "Columns",
+            "row_count": "Rows",
+            "has_ai_analysis": "AI Status",
+        },
+    )
 
     table_names = sorted(filtered_df["table_name"].dropna().unique().tolist())
     if table_names:

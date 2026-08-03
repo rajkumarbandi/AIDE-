@@ -26,6 +26,8 @@ render_page_header(
     description="Ask anything about the business — the assistant answers from live "
     "warehouse data automatically. No SQL, no buttons, just an answer.",
     breadcrumb=["Home", "AI Assistant"],
+    icon="🤖",
+    accent="orange",
 )
 
 _HISTORY_KEY = "aide_assistant_history"

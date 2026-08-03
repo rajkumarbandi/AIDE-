@@ -19,7 +19,7 @@ import streamlit as st
 
 from components.filters import get_filters
 from components.header import render_page_header
-from components.metric_cards import priority_badge, status_badge
+from components.metric_cards import priority_badge, reviewer_badge, status_badge
 from components.shell import render_app_shell
 from components.tables import render_empty_state
 from utils.config import DEFAULT_METADATA_SCHEMA
@@ -42,6 +42,8 @@ render_page_header(
     description="Review, filter, and action every reviewer comment raised across the catalog — "
     "an enterprise data governance workflow for metadata quality.",
     breadcrumb=["Home", "Data Governance"],
+    icon="🛡",
+    accent="error",
 )
 
 filters = get_filters()
@@ -115,8 +117,8 @@ else:
                     + f" — {row['reason']}"
                 )
                 st.markdown(
-                    f"{status_badge(row['status'])} {priority_badge(row['priority'])} · "
-                    f"By {html.escape(str(row['author']))} on {row['created_at']} · "
+                    f"{status_badge(row['status'])} {priority_badge(row['priority'])} "
+                    f"{reviewer_badge(str(row['author']))} · on {row['created_at']} · "
                     f"Last updated {row['updated_at']}",
                     unsafe_allow_html=True,
                 )
@@ -150,7 +152,17 @@ else:
 
                     if replies_df is not None and not replies_df.empty:
                         for _, reply in replies_df.iterrows():
-                            st.markdown(f"↳ *{reply['author']}* ({reply['created_at']}): {reply['reply_text']}")
+                            # reviewer_badge() escapes the author internally, but
+                            # reply_text is free-form user input — since this line
+                            # now needs unsafe_allow_html=True for the badge markup,
+                            # reply_text must be explicitly escaped too, or a
+                            # malicious reply becomes a stored-XSS payload rendered
+                            # to every viewer of this page.
+                            st.markdown(
+                                f"↳ {reviewer_badge(str(reply['author']))} "
+                                f"({reply['created_at']}): {html.escape(str(reply['reply_text']))}",
+                                unsafe_allow_html=True,
+                            )
 
                     with st.form(key=f"reply_form_{comment_id}", clear_on_submit=True):
                         reply_text = st.text_input("Add a reply", key=f"reply_text_{comment_id}")

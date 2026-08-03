@@ -55,6 +55,8 @@ render_page_header(
     "table to see its AI-generated description, keys, relationships, lineage, and "
     "impact analysis.",
     breadcrumb=["Home", "AI Data Model Explorer"],
+    icon="🧠",
+    accent="ai",
 )
 
 _LAYER_SCHEMAS = {

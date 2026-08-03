@@ -26,6 +26,8 @@ render_page_header(
     title="Settings",
     description="Connection status, cache controls, and configuration reference.",
     breadcrumb=["Home", "Settings"],
+    icon="⚙",
+    accent="silver",
 )
 
 filters = get_filters()

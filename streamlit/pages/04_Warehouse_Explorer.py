@@ -36,6 +36,8 @@ render_page_header(
     description="Browse tables across the Bronze, Silver, and Gold schemas, preview data, "
     "and profile columns.",
     breadcrumb=["Home", "Warehouse Explorer"],
+    icon="🗄",
+    accent="cyan",
 )
 
 filters = get_filters()

@@ -12,11 +12,26 @@ from utils.config import DEFAULT_CATALOG, DEFAULT_GOLD_SCHEMA, DEFAULT_METADATA_
 def sql_table_metadata(
     catalog: str = DEFAULT_CATALOG, metadata_schema: str = DEFAULT_METADATA_SCHEMA
 ) -> str:
-    """Every row from the AI Metadata Collector's output (currently Bronze-scope —
-    see KNOWN_SILVER_TABLES/KNOWN_GOLD_TABLES below for why the graph doesn't stop
-    there).
+    """One row per (catalog_name, schema_name, table_name) from the AI Metadata
+    Collector's output — 02_metadata_collector.py now covers all three medallion
+    layers (Bronze, Silver, and Gold; previously Bronze-only), each written with
+    a per-layer `replaceWhere` overwrite that should already guarantee at most
+    one row per table. This stays defensive with a QUALIFY dedup anyway (a real,
+    reported bug: the AI Data Catalog showed duplicate rows for the same table
+    because the caller assumed this was still Bronze-only and separately unioned
+    in a live information_schema listing for Silver/Gold, double-counting any
+    table that already had AI-collected metadata — see
+    pages/02_AI_Data_Catalog.py::_load_unified_catalog) — so a stale/legacy
+    duplicate row can never resurface: the most recently collected row per table
+    always wins.
     """
-    return f"SELECT * FROM {catalog}.{metadata_schema}.table_metadata"
+    return (
+        f"SELECT * FROM {catalog}.{metadata_schema}.table_metadata "
+        "QUALIFY ROW_NUMBER() OVER ("
+        "PARTITION BY catalog_name, schema_name, table_name "
+        "ORDER BY metadata_collected_at DESC"
+        ") = 1"
+    )
 
 
 def sql_ai_analysis(
@@ -24,12 +39,26 @@ def sql_ai_analysis(
     metadata_schema: str = DEFAULT_METADATA_SCHEMA,
     table_name: str = None,
 ) -> str:
-    """AI-generated analysis rows, optionally filtered to one table."""
+    """The current AI analysis row per table, optionally filtered to one table.
+
+    03_metadata_analyzer.py upserts (UPDATEs) exactly one row per (catalog,
+    schema, table), so this should never see duplicates in practice — but stays
+    defensive with a QUALIFY dedup: among any rows sharing the same key, a
+    SUCCESS row always wins over PENDING/PROCESSING/FAILED, and ties break by
+    the most recent analysis_timestamp. "Always use the latest successful
+    analysis," not just the most recent attempt regardless of outcome.
+    """
     base = f"SELECT * FROM {catalog}.{metadata_schema}.ai_analysis"
     if table_name:
         safe_name = table_name.replace("'", "")
         base += f" WHERE table_name = '{safe_name}'"
-    return base + " ORDER BY analysis_timestamp DESC"
+    return (
+        base + " QUALIFY ROW_NUMBER() OVER ("
+        "PARTITION BY catalog_name, schema_name, table_name "
+        "ORDER BY CASE WHEN processing_status = 'SUCCESS' THEN 0 ELSE 1 END, "
+        "analysis_timestamp DESC"
+        ") = 1 ORDER BY analysis_timestamp DESC"
+    )
 
 
 def sql_kpi_summary(catalog: str = DEFAULT_CATALOG, gold_schema: str = DEFAULT_GOLD_SCHEMA) -> str:

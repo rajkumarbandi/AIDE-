@@ -34,6 +34,8 @@ render_page_header(
     description="Run read-only SQL directly against the warehouse — with syntax "
     "highlighting, timing, history, and saved queries.",
     breadcrumb=["Home", "SQL Playground"],
+    icon="💻",
+    accent="cyan",
 )
 
 _EDITOR_KEY = "aide_playground_editor"

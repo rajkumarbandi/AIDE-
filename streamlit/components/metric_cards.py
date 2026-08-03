@@ -13,8 +13,9 @@ import streamlit as st
 from utils.config import STATUS_COLORS
 
 # Maps a badge "kind" to assets/style.css's .aide-badge-* class — the app-wide
-# color convention: blue=info, green=success, amber=warning, red=error,
-# purple=AI, plus bronze/silver/gold for medallion layer.
+# color convention: blue=info/fact, green=success/dimension, amber=warning,
+# red=error, purple=AI/metadata, orange=reviewer, plus bronze/silver/gold for
+# medallion layer.
 _BADGE_CLASSES = {
     "info": "aide-badge-info",
     "success": "aide-badge-success",
@@ -24,6 +25,10 @@ _BADGE_CLASSES = {
     "bronze": "aide-badge-bronze",
     "silver": "aide-badge-silver",
     "gold": "aide-badge-gold",
+    "fact": "aide-badge-fact",
+    "dimension": "aide-badge-dimension",
+    "metadata": "aide-badge-metadata",
+    "reviewer": "aide-badge-reviewer",
 }
 
 # Governance status/priority values map to a badge kind by real business
@@ -84,6 +89,21 @@ def layer_badge(layer: str) -> str:
     same convention used by the AI Data Model Explorer's ER diagram.
     """
     return render_badge(layer.title(), layer.lower() if layer.lower() in ("bronze", "silver", "gold") else "info")
+
+
+def table_kind_badge(kind: str) -> str:
+    """A Gold table kind (fact/dimension), badge-colored to match
+    utils.config.LAYER_COLORS' fact=blue/dimension=green convention.
+    """
+    return render_badge(kind.title(), kind.lower() if kind.lower() in ("fact", "dimension") else "info")
+
+
+def reviewer_badge(name: str) -> str:
+    """A reviewer/comment author name, always orange — the app-wide color
+    convention for anything reviewer-related (Data Governance, AI Data
+    Catalog's per-table comment tab).
+    """
+    return render_badge(name, "reviewer")
 
 
 def render_metric_card(label: str, value: str, status: str = None, caption: str = None) -> None:

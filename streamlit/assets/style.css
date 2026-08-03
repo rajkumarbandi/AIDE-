@@ -25,6 +25,14 @@
   --aide-silver-soft: rgba(148, 163, 184, 0.15);
   --aide-gold: #eab308;
   --aide-gold-soft: rgba(234, 179, 8, 0.15);
+  /* Cyan (Warehouse Explorer/SQL Playground identity) and orange (AI
+     Assistant identity + Reviewer badges) — same desaturated, professional
+     hue family as every color above, added for the per-page accent system
+     in components/header.py, not a one-off flashy color. */
+  --aide-cyan: #06b6d4;
+  --aide-cyan-soft: rgba(6, 182, 212, 0.15);
+  --aide-orange: #f97316;
+  --aide-orange-soft: rgba(249, 115, 22, 0.15);
   --aide-radius: 12px;
   --aide-radius-sm: 8px;
   --aide-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.24);
@@ -324,4 +332,273 @@ hr {
   color: var(--aide-text);
   white-space: normal;
   word-break: break-word;
+}
+
+/* ===========================================================================
+   Application-wide UI overhaul — typography, spacing, buttons, dropdowns,
+   tabs, sidebar, dataframe container, extra badge kinds, and the per-page
+   accent/icon identity chip. Same token palette as above — no new colors,
+   dark theme preserved throughout. Every selector below is a verified-stable
+   Streamlit data-testid/data-baseweb attribute (checked directly against the
+   installed streamlit==1.60.0 frontend bundle, not guessed) so a future
+   Streamlit upgrade degrades gracefully (unstyled, never broken) rather than
+   silently doing nothing on a typo'd selector.
+   =========================================================================== */
+
+/* --- Typography ------------------------------------------------------------ */
+[data-testid="stMarkdownContainer"] p, [data-testid="stMarkdownContainer"] li {
+  line-height: 1.65;
+}
+
+[data-testid="stCaptionContainer"] {
+  color: var(--aide-text-muted);
+  font-size: 12.5px;
+}
+
+[data-testid="stHeading"] h2, [data-testid="stHeading"] h3 {
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+[data-testid="stWidgetLabel"] p {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--aide-text-muted);
+}
+
+/* --- Layout / spacing ------------------------------------------------------ */
+[data-testid="stHorizontalBlock"] {
+  gap: var(--aide-space-md);
+}
+
+.block-container {
+  padding-bottom: var(--aide-space-lg);
+}
+
+/* --- Buttons: gradient primary action, refined secondary ------------------- */
+[data-testid="stBaseButton-primary"] {
+  background: linear-gradient(135deg, var(--aide-accent) 0%, #1d4fd1 100%) !important;
+  border: none !important;
+  font-weight: 600;
+}
+
+[data-testid="stBaseButton-secondary"] {
+  border: 1px solid var(--aide-border) !important;
+  background: var(--aide-surface) !important;
+}
+
+[data-testid="stBaseButton-secondary"]:hover {
+  border-color: var(--aide-accent) !important;
+  color: var(--aide-accent) !important;
+}
+
+/* --- Dropdowns / text inputs / date inputs (BaseWeb-backed widgets share the
+   same data-baseweb attribute regardless of which Streamlit widget renders
+   them) ------------------------------------------------------------------- */
+[data-baseweb="select"] > div,
+[data-testid="stTextInput"] input,
+[data-testid="stTextArea"] textarea,
+[data-testid="stDateInputField"] input {
+  background: var(--aide-surface) !important;
+  border-color: var(--aide-border) !important;
+  border-radius: var(--aide-radius-sm) !important;
+  transition: border-color var(--aide-transition), box-shadow var(--aide-transition);
+}
+
+[data-baseweb="select"] > div:hover,
+[data-testid="stTextInput"] input:hover,
+[data-testid="stTextArea"] textarea:hover {
+  border-color: var(--aide-text-muted) !important;
+}
+
+[data-baseweb="select"]:focus-within > div,
+[data-testid="stTextInput"] input:focus,
+[data-testid="stTextArea"] textarea:focus {
+  border-color: var(--aide-accent) !important;
+  box-shadow: 0 0 0 2px var(--aide-accent-soft) !important;
+}
+
+/* Dropdown listbox — Streamlit renders this in a portal outside the widget's
+   own DOM subtree, but data-baseweb="menu" still reaches it. */
+[data-baseweb="menu"] {
+  background: var(--aide-surface) !important;
+  border: 1px solid var(--aide-border);
+  border-radius: var(--aide-radius-sm);
+  box-shadow: var(--aide-shadow-md);
+}
+
+/* --- Tabs -------------------------------------------------------------- */
+[data-testid="stTabs"] [role="tablist"] {
+  gap: 4px;
+  border-bottom: 1px solid var(--aide-border);
+}
+
+[data-testid="stTabs"] [role="tab"] {
+  border-radius: var(--aide-radius-sm) var(--aide-radius-sm) 0 0;
+  transition: background var(--aide-transition), color var(--aide-transition);
+}
+
+[data-testid="stTabs"] [role="tab"]:hover {
+  background: var(--aide-surface-hover);
+}
+
+[data-testid="stTabs"] [aria-selected="true"] {
+  border-bottom: 2px solid var(--aide-accent) !important;
+}
+
+/* --- Expanders / forms --------------------------------------------------- */
+[data-testid="stExpander"] {
+  border: 1px solid var(--aide-border);
+  border-radius: var(--aide-radius);
+  background: var(--aide-surface);
+}
+
+[data-testid="stForm"] {
+  border: 1px solid var(--aide-border);
+  border-radius: var(--aide-radius);
+  padding: var(--aide-space-md);
+  background: var(--aide-surface);
+}
+
+/* --- Dataframe container ---------------------------------------------------
+   st.dataframe renders its grid on <canvas> (glide-data-grid), so per-row
+   striping/hover isn't reachable via CSS — only the outer wrapper is real
+   DOM. This still gets the same rounded/bordered/shadowed card treatment as
+   every other surface for a consistent look; see components/tables.py's
+   render_html_table() for the fully custom alternative used where sticky
+   headers/alternating rows/inline badges are worth the extra markup. */
+[data-testid="stDataFrame"] {
+  border: 1px solid var(--aide-border);
+  border-radius: var(--aide-radius);
+  overflow: hidden;
+  box-shadow: var(--aide-shadow-sm);
+  transition: box-shadow var(--aide-transition);
+}
+
+[data-testid="stDataFrame"]:hover {
+  box-shadow: var(--aide-shadow-md);
+}
+
+/* --- Sidebar ----------------------------------------------------------- */
+[data-testid="stSidebarContent"] {
+  padding-top: var(--aide-space-sm);
+}
+
+[data-testid="stPageLink"] {
+  border-radius: var(--aide-radius-sm) !important;
+  transition: transform var(--aide-transition);
+  margin-bottom: 1px;
+}
+
+[data-testid="stPageLink"]:hover {
+  transform: translateX(2px);
+}
+
+[data-testid="stPageLink"] p {
+  font-size: 14px;
+  font-weight: 500;
+}
+
+[data-testid="stSidebarContent"] hr {
+  margin: var(--aide-space-sm) 0;
+}
+
+/* --- Extra badge kinds: fact/dimension/metadata/reviewer, matching
+   utils/config.py's LAYER_COLORS so the same meaning always gets the same
+   color everywhere in the app (graph legend, catalog table, detail views). */
+.aide-badge-fact { background: var(--aide-accent-soft); color: #60a5fa; }
+.aide-badge-dimension { background: var(--aide-success-soft); color: #4ade80; }
+.aide-badge-metadata { background: var(--aide-ai-soft); color: #c4b5fd; }
+.aide-badge-reviewer { background: var(--aide-orange-soft); color: #fb923c; }
+
+/* --- Per-page accent identity (components/header.py) -----------------------
+   Each page passes its own accent color + icon to render_page_header(); the
+   icon chip and the header's bottom border pick up that color via inline CSS
+   variables scoped to .aide-page-header, so every page keeps the exact same
+   header layout/spacing (one consistent design language) while still having
+   its own color identity, per the app's page-color convention. Falls back to
+   the generic accent if a page ever omits it. */
+.aide-page-header {
+  --page-accent: var(--aide-page-accent, var(--aide-accent));
+  --page-accent-soft: var(--aide-page-accent-soft, var(--aide-accent-soft));
+}
+
+.aide-page-header .aide-page-description {
+  border-bottom-color: var(--page-accent-soft) !important;
+}
+
+.aide-page-icon-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: var(--aide-radius-sm);
+  font-size: 17px;
+  margin-right: 10px;
+  background: var(--page-accent-soft);
+  color: var(--page-accent);
+  vertical-align: middle;
+  flex-shrink: 0;
+}
+
+.aide-page-title-row {
+  display: flex;
+  align-items: center;
+}
+
+/* --- Premium HTML table (components/tables.py::render_html_table) ---------
+   Sticky header, alternating rows, hover, inline badges/icons — everything
+   st.dataframe's canvas grid can't do (see [data-testid="stDataFrame"]'s
+   comment above). Only used for small, bounded listings. */
+.aide-html-table-wrap {
+  overflow: auto;
+  border: 1px solid var(--aide-border);
+  border-radius: var(--aide-radius);
+  box-shadow: var(--aide-shadow-sm);
+}
+
+.aide-html-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13.5px;
+}
+
+.aide-html-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--aide-surface-hover);
+  color: var(--aide-text-muted);
+  text-align: left;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--aide-border);
+  white-space: nowrap;
+}
+
+.aide-html-table tbody td {
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--aide-border);
+  color: var(--aide-text);
+  white-space: nowrap;
+}
+
+.aide-html-table tbody tr {
+  transition: background var(--aide-transition);
+}
+
+.aide-html-table tbody tr:nth-child(even) {
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.aide-html-table tbody tr:hover {
+  background: var(--aide-surface-hover);
+}
+
+.aide-html-table tbody tr:last-child td {
+  border-bottom: none;
 }

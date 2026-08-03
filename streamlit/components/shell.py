@@ -25,16 +25,21 @@ import streamlit as st
 from components.filters import render_global_filters
 from components.sidebar import render_sidebar_status
 from components.styles import apply_theme
-from utils.config import APP_ICON, APP_TITLE, NAV_PAGES
+from utils.config import APP_TITLE, NAV_PAGES
 
 _ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"
+_FAVICON_PATH = _ASSETS_DIR / "favicon.png"
 
 
 def render_app_shell() -> None:
     """Render the shared shell. Call this first, before any other st.* call."""
     st.set_page_config(
         page_title=APP_TITLE,
-        page_icon=APP_ICON,
+        # A dedicated flat-design PNG (dark blue -> purple gradient rounded
+        # square, white "A"), not an emoji — set_page_config's page_icon
+        # accepts a file path directly, so the browser tab favicon doesn't
+        # depend on emoji font rendering across OSes.
+        page_icon=str(_FAVICON_PATH) if _FAVICON_PATH.exists() else "🧠",
         layout="wide",
         initial_sidebar_state="expanded",
     )
@@ -48,6 +53,7 @@ def render_app_shell() -> None:
         st.markdown(f"**{APP_TITLE}**")
         st.divider()
 
+        st.markdown('<div class="aide-sidebar-label">Navigate</div>', unsafe_allow_html=True)
         for nav in NAV_PAGES:
             st.page_link(nav["path"], label=nav["title"], icon=nav["icon"])
         st.divider()
