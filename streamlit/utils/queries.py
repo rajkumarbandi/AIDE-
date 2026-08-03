@@ -181,6 +181,28 @@ def _where_clause(conditions: list) -> str:
     return f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
 
+def sql_kpi_summary_live(catalog: str, gold_schema: str, filters: dict) -> str:
+    """Live, filter-aware headline KPIs (total revenue/orders/customers/avg
+    order value) computed directly from fact_sales + dimensions, using the
+    same _fact_joins/_filter_conditions/_where_clause helpers every other
+    dashboard query already uses — the Executive Dashboard's KPI row
+    previously read the precomputed, all-time sales_kpi_summary table
+    instead (see sql_kpi_summary below), which has no Year/Territory/
+    Category/Salesperson dimensionality at all and could never respond to
+    the sidebar filters. Top Territory/Top Product aren't included here —
+    they need their own GROUP BY, so the dashboard page derives them from
+    sql_revenue_by_territory/sql_top_products instead of a second query.
+    """
+    where = _where_clause(_filter_conditions(filters))
+    return (
+        "SELECT SUM(f.line_total) AS total_revenue, "
+        "COUNT(DISTINCT f.sales_order_id) AS total_orders, "
+        "COUNT(DISTINCT f.customer_key) AS total_customers, "
+        "SUM(f.line_total) / NULLIF(COUNT(DISTINCT f.sales_order_id), 0) AS avg_order_value "
+        f"{_fact_joins(catalog, gold_schema)} {where}"
+    )
+
+
 def sql_monthly_revenue_trend(catalog: str, gold_schema: str, filters: dict) -> str:
     where = _where_clause(_filter_conditions(filters))
     return (

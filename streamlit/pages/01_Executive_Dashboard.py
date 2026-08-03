@@ -1,12 +1,19 @@
-"""Executive Dashboard — headline KPIs (from sales_kpi_summary) plus a full
-set of interactive, filter-aware trend/breakdown charts and an AI-generated
-executive summary.
+"""Executive Dashboard — headline KPIs plus a full set of interactive,
+filter-aware trend/breakdown charts and an AI-generated executive summary.
 
-Every chart below is computed live against fact_sales joined to its
-dimensions (utils.queries._fact_joins), filtered by the global Year/
-Territory/Product Category/Salesperson filters — this is a genuine
-extension of the existing sales_kpi_summary-based headline row, not a
-replacement for it.
+Every number on this page — the KPI row included — is computed live against
+fact_sales joined to its dimensions (utils.queries._fact_joins), filtered by
+the same global Year/Territory/Product Category/Salesperson `filters` dict
+from components.filters.get_filters(). The KPI row previously read the
+precomputed, all-time sales_kpi_summary table instead, which has no
+Year/Territory/Category/Salesperson dimensionality at all and could never
+respond to the sidebar filters — a real reported bug, fixed by switching it
+to utils.queries.sql_kpi_summary_live() (see that function's docstring).
+
+Top Territory/Top Product are derived from the SAME territory_df/
+top_products_df DataFrames the charts/tables further down the page already
+fetch — computed once, near the top, and reused everywhere, rather than
+querying twice for the same filtered breakdown.
 """
 
 import streamlit as st
@@ -22,7 +29,7 @@ from utils.gemini import GeminiClientError, GeminiConfigurationError, generate_e
 from utils.helpers import format_currency, format_number
 from utils.queries import (
     sql_customer_growth,
-    sql_kpi_summary,
+    sql_kpi_summary_live,
     sql_monthly_revenue_trend,
     sql_order_trend,
     sql_quarterly_revenue,
@@ -57,21 +64,36 @@ def _safe_query(sql: str):
         return None
 
 
-# --- Headline KPI snapshot (existing, unchanged data source) ---------------
-kpi_df = _safe_query(sql_kpi_summary(catalog=catalog, gold_schema=schema))
+# --- Shared fetches: computed once here, reused both by the KPI row below and
+# --- by their own chart/table sections further down the page (no duplicate
+# --- queries for the same filtered breakdown).
+territory_df = _safe_query(sql_revenue_by_territory(catalog, schema, filters))
+top_products_df = _safe_query(sql_top_products(catalog, schema, filters, filters["top_n"]))
+
+# --- Headline KPI row — live, filter-aware (see sql_kpi_summary_live's docstring
+# --- for why this replaced the precomputed sales_kpi_summary table) ---------
+kpi_df = _safe_query(sql_kpi_summary_live(catalog, schema, filters))
 
 if kpi_df is None:
     render_empty_state(
         "Connect to Databricks (see ⚙ Settings) to load live KPIs from "
-        f"`{catalog}.{schema}.sales_kpi_summary`.",
+        f"`{catalog}.{schema}.fact_sales`.",
         icon="🔌",
     )
-elif kpi_df.empty:
-    render_empty_state(
-        "sales_kpi_summary has no rows yet — run 03_gold/07_sales_dashboard.py first.", icon="📭"
-    )
+elif kpi_df.empty or kpi_df.iloc[0].get("total_orders") in (None, 0):
+    render_empty_state("No sales data for the current filters.", icon="📭")
 else:
     row = kpi_df.iloc[0]
+    top_territory_name = (
+        territory_df.iloc[0]["territory_name"]
+        if territory_df is not None and not territory_df.empty
+        else "—"
+    )
+    top_product_name = (
+        top_products_df.iloc[0]["product_name"]
+        if top_products_df is not None and not top_products_df.empty
+        else "—"
+    )
     render_kpi_row(
         [
             {"label": "Total Revenue", "value": format_currency(row.get("total_revenue"))},
@@ -80,14 +102,11 @@ else:
             {"label": "Avg Order Value", "value": format_currency(row.get("avg_order_value"))},
         ]
     )
-    st.caption(
-        f"Top territory: {row.get('top_territory_name', '—')} · Top product: "
-        f"{row.get('top_product_name', '—')} (unfiltered, all-time snapshot)"
-    )
+    st.caption(f"Top territory: {top_territory_name} · Top product: {top_product_name}")
 
 st.divider()
 st.caption(
-    "Everything below reflects the current Year / Territory / Product Category / "
+    "Everything on this page reflects the current Year / Territory / Product Category / "
     "Salesperson filters (sidebar)."
 )
 
@@ -118,7 +137,6 @@ col3, col4 = st.columns(2)
 
 with col3:
     st.subheader("🌍 Sales by Territory")
-    territory_df = _safe_query(sql_revenue_by_territory(catalog, schema, filters))
     if territory_df is not None and not territory_df.empty:
         render_bar_chart(territory_df, x="territory_name", y="revenue")
     else:
@@ -163,7 +181,6 @@ col7, col8 = st.columns(2)
 
 with col7:
     st.subheader(f"🏆 Top {filters['top_n']} Products")
-    top_products_df = _safe_query(sql_top_products(catalog, schema, filters, filters["top_n"]))
     render_dataframe(top_products_df, empty_message="No product data for the current filters.")
 
 with col8:
